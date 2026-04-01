@@ -257,6 +257,27 @@
         @mousedown="startResize"
         title="拖拽调整菜单宽度"
       ></div>
+
+      <!-- 菜单底部操作区 -->
+      <div class="menu-footer" v-if="!isMenuCollapsed">
+        <div class="footer-actions">
+          <button class="footer-btn" @click="handleExportExcel" title="导出 Excel">
+            <span class="footer-btn-icon">📥</span>
+            <span class="footer-btn-text">Excel 导出</span>
+          </button>
+          <button class="footer-btn" @click="triggerImportExcel" title="导入 Excel">
+            <span class="footer-btn-icon">📤</span>
+            <span class="footer-btn-text">Excel 导入</span>
+          </button>
+          <input 
+            type="file" 
+            ref="excelInput" 
+            style="display: none" 
+            accept=".xlsx, .xls"
+            @change="handleImportExcel"
+          />
+        </div>
+      </div>
     </div>
     <!-- 装配历史编辑面板 -->
     <div 
@@ -1048,6 +1069,7 @@ import { useHistoryManager } from './composables/useHistoryManager.js'
 import { useTransformLogic } from './composables/useTransformLogic.js'
 import { useJoinLogic } from './composables/useJoinLogic.js'
 import { loadRecords, saveRecords, clearRecords } from './utils/persistence/localRecordsStore.js'
+import { exportToExcel, importFromExcel } from './utils/excelManager.js'
 import { 
   getCurrentWorkspaceId, 
   getWorkspaces, 
@@ -2113,6 +2135,65 @@ const resetCamera = () => {
 const switchCamera = () => {
     cameraMode.value = cameraMode.value === 'perspective' ? 'orthographic' : 'perspective'
 }
+
+// Excel 导入导出
+const excelInput = ref(null)
+
+const handleExportExcel = () => {
+  try {
+    exportToExcel(partsItems.value, assemblyItems.value)
+  } catch (error) {
+    console.error('导出 Excel 失败:', error)
+    alert('导出 Excel 失败，请检查控制台')
+  }
+}
+
+const triggerImportExcel = () => {
+  if (excelInput.value) {
+    excelInput.value.click()
+  }
+}
+
+const handleImportExcel = async (event) => {
+  const file = event.target.files[0]
+  if (!file) return
+
+  if (!confirm('导入 Excel 将会合并当前工作空间的数据，是否继续？')) {
+    event.target.value = ''
+    return
+  }
+
+  try {
+    const { partsItems: newParts, assemblyItems: newAssembly } = await importFromExcel(file)
+    
+    // 合并数据（简单的去重或直接追加）
+    // 这里采用追加并使用 Set 去重 ID 的策略，或者用户可能期望覆盖
+    // 根据需求提示，通常批量导入可能是为了同步或替换
+    // 为了安全，我们先合并零件，再合并装配体
+    
+    const partsMap = new Map(partsItems.value.map(p => [p.id, p]))
+    newParts.forEach(p => partsMap.set(p.id, p))
+    partsItems.value = Array.from(partsMap.values())
+
+    const assemblyMap = new Map(assemblyItems.value.map(a => [a.id, a]))
+    newAssembly.forEach(a => assemblyMap.set(a.id, a))
+    assemblyItems.value = Array.from(assemblyMap.values())
+
+    alert('导入成功！')
+    
+    // 刷新视图
+    flushPersist()
+    if (assemblyItems.value.length > 0) {
+      viewAssembly()
+    }
+  } catch (error) {
+    console.error('导入 Excel 失败:', error)
+    alert('导入失败，请确保文件格式正确')
+  } finally {
+    event.target.value = ''
+  }
+}
+
 const clearAllData = () => {
     if(confirm('确定要清除所有数据吗？')) {
         suppressPersist = true
