@@ -758,12 +758,7 @@
         <button @click="resetCamera">重置相机</button>
         <button @click="switchCamera">{{ cameraMode === 'perspective' ? '透视' : '正交' }}</button>
         <button @click="switchRendererType">{{ rendererType === 'webgl' ? 'WebGL' : 'WebGPU' }}</button>
-        <template v-if="isViewingAssembly">
-          <button @click="lodAutoMode = !lodAutoMode">{{ lodAutoMode ? '自动优化' : '手动优化' }}</button>
-          <label v-if="!lodAutoMode" style="display:flex;align-items:center;gap:4px;color:#ccc;font-size:12px;">
-            细分 <input type="number" v-model.number="lodManualSegments" min="3" max="16" style="width:40px;background:#333;color:#fff;border:1px solid #555;border-radius:3px;text-align:center;" @change="applyManualLod" />
-          </label>
-        </template>
+        <button type="button" @click="toggleShadows">{{ shadowsEnabled ? '阴影：开' : '阴影：关' }}</button>
         <button @click="clearAllData" class="danger-btn">清除所有</button>
       </div>
     </div>
@@ -2348,6 +2343,22 @@ const switchRendererType = () => {
 }
 const handleRendererSwitched = (event) => {
     rendererType.value = event.detail.type
+}
+
+const readShadowsEnabled = () => {
+  try {
+    return localStorage.getItem('3dbuild.shadowsEnabled') !== '0'
+  } catch {
+    return true
+  }
+}
+const shadowsEnabled = ref(readShadowsEnabled())
+const toggleShadows = () => {
+  shadowsEnabled.value = !shadowsEnabled.value
+  try {
+    localStorage.setItem('3dbuild.shadowsEnabled', shadowsEnabled.value ? '1' : '0')
+  } catch { /* noop */ }
+  window.dispatchEvent(new CustomEvent('shadows-setting', { detail: { enabled: shadowsEnabled.value } }))
 }
 
 // Excel 导入导出

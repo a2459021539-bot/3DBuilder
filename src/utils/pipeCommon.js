@@ -18,24 +18,46 @@ export function createPipeSection(outerRadius, innerRadius, segments) {
   return shape
 }
 
+// 缓存的通用材质
+let _sharedPipeMaterial = null
+let _sharedEndCapMaterial = null
+let _sharedHitboxMaterial = null
+
 // 创建管道材质
 export function createPipeMaterial() {
-  return new THREE.MeshStandardMaterial({
-    color: 0x4a9eff,
-    metalness: 0.3,
-    roughness: 0.7,
-    side: THREE.DoubleSide
-  })
+  if (!_sharedPipeMaterial) {
+    _sharedPipeMaterial = new THREE.MeshStandardMaterial({
+      color: 0x4a9eff,
+      metalness: 0.3,
+      roughness: 0.7
+    })
+  }
+  return _sharedPipeMaterial
 }
 
 // 创建端面材质（使用不同颜色以便区分）
 export function createEndCapMaterial() {
-  return new THREE.MeshStandardMaterial({
-    color: 0xffaa00, // 橙色，便于识别
-    metalness: 0.3,
-    roughness: 0.7,
-    side: THREE.DoubleSide
-  })
+  if (!_sharedEndCapMaterial) {
+    _sharedEndCapMaterial = new THREE.MeshStandardMaterial({
+      color: 0xffaa00, // 橙色，便于识别
+      metalness: 0.3,
+      roughness: 0.7
+    })
+  }
+  return _sharedEndCapMaterial
+}
+
+// 获取统一的碰撞体材质
+export function getHitboxMaterial() {
+  if (!_sharedHitboxMaterial) {
+    _sharedHitboxMaterial = new THREE.MeshBasicMaterial({
+      color: 0xff0000,
+      transparent: true,
+      opacity: 0,
+      side: THREE.DoubleSide
+    })
+  }
+  return _sharedHitboxMaterial
 }
 
 // 创建直管端面几何体

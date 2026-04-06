@@ -5,7 +5,8 @@ import {
   createPipeSection,
   setupEndFaceUserData,
   createEndCapForExtrudeFrame,
-  createHitboxForExtrudeFrame
+  createHitboxForExtrudeFrame,
+  getHitboxMaterial
 } from './pipeCommon.js'
 
 // 2D路径曲线类（组合直线和圆弧）
@@ -227,12 +228,7 @@ export function createSketch2DPipe(params, assemblyItemId = null) {
   const startHitboxGeometry = createHitboxForExtrudeFrame(
     outerRadius * 1.1, startPoint, startN, startB, startNormal, radialSegments
   )
-  const startHitboxMaterial = new THREE.MeshBasicMaterial({ 
-    color: 0xff0000,
-    transparent: true,
-    opacity: 0,
-    side: THREE.DoubleSide
-  })
+  const startHitboxMaterial = getHitboxMaterial()
   const startHitbox = new THREE.Mesh(startHitboxGeometry, startHitboxMaterial)
   setupEndFaceUserData(startHitbox, 'front', startPoint.clone(), startNormal.clone(), assemblyItemId)
   

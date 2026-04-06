@@ -4,7 +4,8 @@ import {
   createPipeSection,
   setupEndFaceUserData,
   createEndCapForExtrudeFrame,
-  createHitboxForExtrudeFrame
+  createHitboxForExtrudeFrame,
+  getHitboxMaterial
 } from './pipeCommon.js'
 
 // ArcCurve 类（弯管曲线）
@@ -97,12 +98,7 @@ export function createBendPipe(params, pipeMaterial, assemblyItemId) {
   const startCap = new THREE.Mesh(startCapGeometry, endCapMaterial)
   setupEndFaceUserData(startCap, 'front', startP.clone(), startNormal.clone(), assemblyItemId)
   
-  const hitboxMaterial = new THREE.MeshBasicMaterial({ 
-    color: 0xff0000,
-    transparent: true,
-    opacity: 0,
-    side: THREE.DoubleSide
-  })
+  const hitboxMaterial = getHitboxMaterial()
   const startHitboxGeometry = createHitboxForExtrudeFrame(
     outerRadius * 1.1, startP, startN, startB, startNormal, capRadialSegs
   )

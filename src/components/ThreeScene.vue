@@ -54,7 +54,22 @@ import { createSketch2DPipe } from '../utils/sketch2dPipe.js'
 import { createSketch3DPipe } from '../utils/sketch3dPipe.js'
 import Sketch2DCanvas from './Sketch2DCanvas.vue'
 import { ExportManager } from '../utils/exportManager.js'
+import { buildBatchedProxy, clearBatchedProxy, updateBatchedProxyMatrices, unhideAllOriginals } from '../utils/batchedProxy.js'
 import Stats from 'stats.js'
+
+/** 性能日志：控制台执行 localStorage.setItem('3dbuild.perfDebug','1') 后刷新；或地址栏 ?perfDebug=1。关闭：removeItem 或设 0 */
+const getPerfDebugEnabled = () => {
+  if (typeof window === 'undefined') return false
+  try {
+    if (localStorage.getItem('3dbuild.perfDebug') === '1') return true
+    return new URLSearchParams(window.location.search).get('perfDebug') === '1'
+  } catch {
+    return false
+  }
+}
+let _perfDebugEnabled = false
+let _perfDebugFrame = 0
+let _perfLogEvery = 90
 
 const containerRef = ref(null)
 let stats = null
@@ -63,6 +78,10 @@ let camera = null
 let renderer = null
 let controls = null
 let transformControl = null
+/** 主方向光（阴影开关需要引用） */
+let mainDirectionalLight = null
+/** 全局阴影开关；新创建的管道会按此标志设置 cast/receive */
+let shadowsGloballyEnabled = true
 let isPerspective = true // 当前是否为透视相机
 const isWebGPU = ref(false) // 当前是否使用WebGPU渲染
 let previewPipe = null // 预览直管对象
@@ -443,14 +462,22 @@ const initThree = async () => {
   )
   camera.position.set(5, 5, 5)
 
+  try {
+    shadowsGloballyEnabled = localStorage.getItem('3dbuild.shadowsEnabled') !== '0'
+  } catch {
+    shadowsGloballyEnabled = true
+  }
+
   // 创建渲染器（统一使用 WebGPURenderer，默认 WebGL 后端）
   renderer = new WebGPURenderer({ antialias: true, powerPreference: 'high-performance', forceWebGL: true })
   await renderer.init()
   renderer.setSize(window.innerWidth, window.innerHeight)
   renderer.setPixelRatio(window.devicePixelRatio)
-  // 启用阴影映射
-  renderer.shadowMap.enabled = true
-  renderer.shadowMap.type = THREE.PCFShadowMap
+  if (renderer.shadowMap) {
+    renderer.shadowMap.enabled = shadowsGloballyEnabled
+    renderer.shadowMap.type = THREE.PCFShadowMap
+    renderer.shadowMap.autoUpdate = false // 关闭每帧自动更新，仅在物体变动时手动更新
+  }
   containerRef.value.appendChild(renderer.domElement)
 
   // 添加环境光
@@ -458,20 +485,20 @@ const initThree = async () => {
   scene.add(ambientLight)
 
   // 添加方向光（用于产生阴影）
-  const directionalLight = new THREE.DirectionalLight(0xffffff, 1)
-  directionalLight.position.set(5, 10, 5)
-  directionalLight.castShadow = true
+  mainDirectionalLight = new THREE.DirectionalLight(0xffffff, 1)
+  mainDirectionalLight.position.set(5, 10, 5)
+  mainDirectionalLight.castShadow = shadowsGloballyEnabled
   // 配置阴影贴图参数
-  directionalLight.shadow.mapSize.width = 2048
-  directionalLight.shadow.mapSize.height = 2048
-  directionalLight.shadow.camera.near = 0.5
-  directionalLight.shadow.camera.far = 500
-  directionalLight.shadow.camera.left = -100
-  directionalLight.shadow.camera.right = 100
-  directionalLight.shadow.camera.top = 100
-  directionalLight.shadow.camera.bottom = -100
-  directionalLight.shadow.bias = -0.0001
-  scene.add(directionalLight)
+  mainDirectionalLight.shadow.mapSize.width = 2048
+  mainDirectionalLight.shadow.mapSize.height = 2048
+  mainDirectionalLight.shadow.camera.near = 0.5
+  mainDirectionalLight.shadow.camera.far = 500
+  mainDirectionalLight.shadow.camera.left = -100
+  mainDirectionalLight.shadow.camera.right = 100
+  mainDirectionalLight.shadow.camera.top = 100
+  mainDirectionalLight.shadow.camera.bottom = -100
+  mainDirectionalLight.shadow.bias = -0.0001
+  scene.add(mainDirectionalLight)
 
   // 创建动态网格系统
   updateDynamicGrid()
@@ -503,6 +530,16 @@ const initThree = async () => {
     // 拖拽时关闭轨道控制，避免冲突
     if (controls) {
       controls.enabled = !event.value
+    }
+    const obj = transformControl.object
+    if (obj) {
+      if (event.value) {
+        unfreezeObjectSubtree(obj)
+      } else {
+        obj.traverse((o) => { o.matrixAutoUpdate = false })
+        obj.updateMatrixWorld(true)
+        if (isAssemblyMode && previewPipe) freezePreviewPipeMatrices()
+      }
     }
   })
 
@@ -576,18 +613,38 @@ const initThree = async () => {
 }
 
 let _statsInfoTimer = 0
+
+let _shadowUpdateRequested = false
+const requestShadowUpdate = () => {
+  _shadowUpdateRequested = true
+}
+
 const animateLoop = () => {
   if (stats) { stats.begin(); if (stats._ms) stats._ms.begin(); if (stats._mb) stats._mb.begin() }
+
+  if (++_perfDebugFrame % 120 === 0) _perfDebugEnabled = getPerfDebugEnabled()
+  const dbg = _perfDebugEnabled
+  let t0 = 0; let t1 = 0; let t2 = 0; let t3 = 0; let t4 = 0
+  if (dbg) t0 = performance.now()
 
   if (controls) {
     controls.update()
   }
+  if (dbg) t1 = performance.now()
 
   updateDynamicGrid()
+  if (dbg) t2 = performance.now()
+
+  if (_shadowUpdateRequested && renderer.shadowMap && renderer.shadowMap.enabled) {
+    renderer.shadowMap.needsUpdate = true
+    _shadowUpdateRequested = false
+  }
 
   renderer.render(scene, camera)
+  if (dbg) t3 = performance.now()
   // 必须在 render/submit 之后再 dispose 旧网格，避免 WebGPU 与 Three 内部缓存竞态（移动相机时高频重建网格）
   tickPendingGridDisposals()
+  if (dbg) t4 = performance.now()
   // FPS 自适应 LOD
   _fpsFrames++
   const now = performance.now()
@@ -599,11 +656,51 @@ const animateLoop = () => {
   }
   if (stats) {
     stats.end(); if (stats._ms) stats._ms.end(); if (stats._mb) stats._mb.end()
-    if (stats._info && ++_statsInfoTimer % 30 === 0) {
+    if (stats._info && ++_statsInfoTimer % 120 === 0) {
       let meshes = 0, tris = 0
       scene.traverse(o => { if (o.isMesh && o.visible && o.userData.isOuterSurface) { meshes++; const g = o.geometry; if (g) tris += g.index ? g.index.count / 3 : (g.attributes.position ? g.attributes.position.count / 3 : 0) } })
       stats._info.textContent = `零件 ${meshes}  面 ${Math.round(tris)}`
     }
+  }
+
+  if (dbg && _perfDebugFrame % _perfLogEvery === 0) {
+    let meshAll = 0; let meshVisible = 0; let outer = 0; let castShadow = 0
+    scene.traverse((o) => {
+      if (!o.isMesh) return
+      meshAll++
+      if (o.visible) meshVisible++
+      if (o.userData?.isOuterSurface) outer++
+      if (o.castShadow) castShadow++
+    })
+    const r = renderer
+    const backend = r?.backend?.isWebGPUBackend ? 'webgpu' : 'webgl'
+    const info = r?.info
+    // 注意：info.render.calls 在 Three 里是「自启动累计」，会一直涨；每帧请看 drawCalls / triangles / frameCalls
+    const drawCallsFrame = info?.render?.drawCalls
+    const triFrame = info?.render?.triangles
+    const framePasses = info?.render?.frameCalls
+    const callsLifetime = info?.render?.calls
+    console.log('[3DBuild perf]', {
+      lodAuto: _lodAutoMode,
+      refineScheduled: !!_refineRAF,
+      backend,
+      ms: {
+        controls: +(t1 - t0).toFixed(2),
+        grid: +(t2 - t1).toFixed(2),
+        render: +(t3 - t2).toFixed(2),
+        gridDispose: +(t4 - t3).toFixed(2),
+        frame: +(t4 - t0).toFixed(2)
+      },
+      meshes: { total: meshAll, visible: meshVisible, outerSurface: outer, castShadow },
+      rendererInfo: info?.render
+        ? {
+            drawCallsThisFrame: drawCallsFrame,
+            trianglesThisFrame: triFrame,
+            renderPassesThisFrame: framePasses,
+            renderCallsLifetime: callsLifetime
+          }
+        : '(无 info.render)'
+    })
   }
 }
 
@@ -801,8 +898,10 @@ const switchRenderer = async () => {
   renderer.setSize(rect.width, rect.height)
   renderer.setPixelRatio(window.devicePixelRatio)
   if (renderer.shadowMap) {
-    renderer.shadowMap.enabled = true
+    renderer.shadowMap.enabled = shadowsGloballyEnabled
     renderer.shadowMap.type = THREE.PCFShadowMap
+    renderer.shadowMap.autoUpdate = false
+    renderer.shadowMap.needsUpdate = true
   }
   containerRef.value.appendChild(renderer.domElement)
 
@@ -853,6 +952,7 @@ const switchRenderer = async () => {
 
   // 通知App.vue更新按钮文字
   window.dispatchEvent(new CustomEvent('renderer-switched', { detail: { type: useGPU ? 'webgpu' : 'webgl' } }))
+  applyShadowSettings(shadowsGloballyEnabled)
 }
 
 const handleResetCamera = () => {
@@ -863,14 +963,62 @@ const handleResetCamera = () => {
   }
 }
 
-// 为管道对象启用阴影的辅助函数
+const applyShadowSettings = (enabled) => {
+  shadowsGloballyEnabled = !!enabled
+  if (renderer && renderer.shadowMap) {
+    renderer.shadowMap.enabled = shadowsGloballyEnabled
+  }
+  if (mainDirectionalLight) {
+    mainDirectionalLight.castShadow = shadowsGloballyEnabled
+  }
+  if (scene) {
+    scene.traverse((o) => {
+      if (o.isMesh) {
+        o.castShadow = shadowsGloballyEnabled
+        o.receiveShadow = shadowsGloballyEnabled
+      }
+    })
+  }
+  requestShadowUpdate()
+}
+
+const handleShadowsSetting = (event) => {
+  const enabled = event.detail?.enabled !== false
+  applyShadowSettings(enabled)
+}
+
+/** 装配体静态放置后冻结矩阵，避免 Orbit 阻尼下每帧对数千 Group/Mesh 重算局部 matrix（CPU 大户） */
+const freezePreviewPipeMatrices = () => {
+  if (!previewPipe) return
+  previewPipe.traverse((o) => { o.matrixAutoUpdate = false })
+  previewPipe.updateMatrixWorld(true)
+}
+
+const unfreezeObjectSubtree = (obj) => {
+  if (!obj) return
+  obj.traverse((o) => { o.matrixAutoUpdate = true })
+}
+
+const freezeObjectSubtree = (obj) => {
+  if (!obj) return
+  obj.traverse((o) => { o.matrixAutoUpdate = false })
+  obj.updateMatrixWorld(true)
+}
+
+// 为管道对象按当前全局开关设置阴影
 const enableShadowsForObject = (object) => {
   if (!object) return
-  
+  const on = shadowsGloballyEnabled
   object.traverse((child) => {
     if (child instanceof THREE.Mesh) {
-      child.castShadow = true
-      child.receiveShadow = true
+      if (child.layers.test(1) && !child.layers.test(0)) {
+        // hitbox，不需要阴影
+        child.castShadow = false
+        child.receiveShadow = false
+      } else {
+        child.castShadow = on
+        child.receiveShadow = on
+      }
     }
   })
 }
@@ -881,6 +1029,7 @@ const attachRotationGizmo = (pipeGroup, assemblyItemId) => {
   rotatedObject = pipeGroup
   rotatedAssemblyItemId = assemblyItemId
   if (transformControl && pipeGroup) {
+    unfreezeObjectSubtree(pipeGroup)
     transformControl.attach(pipeGroup)
     transformControl.visible = true
     transformControl.enabled = true
@@ -905,6 +1054,7 @@ const detachRotationGizmo = () => {
   selectedPipeGroup = null
   rotatedObject = null
   rotatedAssemblyItemId = null
+  if (isAssemblyMode && previewPipe) freezePreviewPipeMatrices()
 }
 
 // 创建直管预览
@@ -937,6 +1087,8 @@ const createPipePreview = (params) => {
 
   previewPipe = pipeGroup
   scene.add(previewPipe)
+  freezePreviewPipeMatrices()
+  requestShadowUpdate()
 
   // 自动调整相机以查看整个模型
   if (camera && controls) {
@@ -950,6 +1102,8 @@ const createPipePreview = (params) => {
 
 // 射线检测相关
 const raycaster = new THREE.Raycaster()
+raycaster.layers.enable(1)
+raycaster.layers.enable(2) // 允许射线检测隐藏在逻辑层（图层2）的原始网格
 const pointer = new THREE.Vector2()
 
 // 拖拽相关变量
@@ -1431,7 +1585,12 @@ const onMouseDown = (event) => {
             // 开始拖拽
             isDragging = true
             hasMoved = false // 重置移动标记
-            
+            if (draggedObjects.length > 0) {
+              draggedObjects.forEach((g) => unfreezeObjectSubtree(g))
+            } else {
+              unfreezeObjectSubtree(pipeGroup)
+            }
+
             // 触发显示移动参数面板（使用第一个项的信息）
             window.dispatchEvent(new CustomEvent('show-transform-panel', {
               detail: {
@@ -1513,7 +1672,8 @@ const onMouseMove = (event) => {
     // 强制更新对象矩阵，确保实时渲染
     rotatedObject.updateMatrix()
     rotatedObject.updateMatrixWorld(true)
-    
+    requestShadowUpdate()
+
     // 同步更新数据（通过事件通知 App.vue）
     window.dispatchEvent(new CustomEvent('assembly-item-rotation-updated', {
       detail: {
@@ -1526,6 +1686,9 @@ const onMouseMove = (event) => {
         isUserInput: false // 这是拖动操作，不是输入框输入
       }
     }))
+    
+    // 更新代理网格实例
+    updateBatchedProxyMatrices(rotatedAssemblyItemId)
     return
   }
   
@@ -1607,7 +1770,10 @@ const onMouseMove = (event) => {
       }
     } else {
       // 单个移动模式（原有逻辑）
-    draggedObject.position.copy(newPosition)
+    if (draggedObject) {
+      draggedObject.position.copy(newPosition)
+      requestShadowUpdate()
+    }
     
     // 同步更新数据（通过事件通知 App.vue）
     window.dispatchEvent(new CustomEvent('assembly-item-position-updated', {
@@ -1620,6 +1786,9 @@ const onMouseMove = (event) => {
         }
       }
     }))
+    
+    // 更新代理网格实例
+    updateBatchedProxyMatrices(draggedAssemblyItemId)
     }
   }
 }
@@ -1752,6 +1921,8 @@ const onMouseUp = (event) => {
     draggedAssemblyItemId = null
     draggedAssemblyItemIds = []
     dragPlane = null
+
+    if (isAssemblyMode && previewPipe) freezePreviewPipeMatrices()
   }
 }
 
@@ -1784,9 +1955,14 @@ const updatePipePreview = (params) => {
 // 清除预览
 const clearPipePreview = () => {
   if (previewPipe && scene) {
+    if (_refineRAF) {
+      cancelAnimationFrame(_refineRAF)
+      _refineRAF = null
+    }
     scene.remove(previewPipe)
     detachRotationGizmo()
     clearArraySelection()
+    clearBatchedProxy(scene)
     // 清理资源
     if (previewPipe.children) {
       previewPipe.children.forEach(child => {
@@ -1796,6 +1972,7 @@ const clearPipePreview = () => {
     }
     previewPipe = null
     isAssemblyMode = false
+    requestShadowUpdate()
   }
 }
 
@@ -1969,6 +2146,8 @@ const sketch3DRaycastToPlane = (event) => {
     -((event.clientY - rect.top) / rect.height) * 2 + 1
   )
   const raycaster = new THREE.Raycaster()
+raycaster.layers.enable(1)
+raycaster.layers.enable(2) // 允许射线检测隐藏在逻辑层（图层2）的原始网格
   raycaster.setFromCamera(pointer, camera)
   const intersection = new THREE.Vector3()
   if (raycaster.ray.intersectPlane(sketch3DGetWorkingPlane(), intersection)) {
@@ -2314,8 +2493,11 @@ const handleSketch3DKeyDown = (event) => {
 
 // === 渐进细分 LOD ===
 let _refineRAF = null
+/** 游标式挑选待细分管段，避免原先用 Group.geometry 做视锥判断（恒为假）导致每帧 O(n) 扫全装配且必命中 fallback */
+let _lodRefineCursor = 0
 let _fpsFrames = 0, _fpsLastTime = performance.now(), _fpsValue = 60
-let _lodAutoMode = true
+// 默认关闭自动 LOD（已改用 BatchedMesh 大幅优化 Draw Call，细分不再是瓶颈，关闭可避免 WebGPU 下频繁的 remove 导致竞态崩溃）
+let _lodAutoMode = false
 
 const getNextLodSegments = (current, target) => {
   return Math.min(current + 1, target)
@@ -2344,6 +2526,9 @@ const refinePipeObject = (pipeGroup) => {
   pipeGroup.position.copy(pos)
   pipeGroup.rotation.copy(rot)
   ud._lodSegments = nextSeg
+  enableShadowsForObject(pipeGroup)
+  freezeObjectSubtree(pipeGroup)
+  requestShadowUpdate()
   return true
 }
 
@@ -2375,30 +2560,37 @@ const degradeLod = () => {
   target.position.copy(pos)
   target.rotation.copy(rot)
   ud._lodSegments = prevSeg
+  enableShadowsForObject(target)
+  freezeObjectSubtree(target)
+  requestShadowUpdate()
 }
-
-const _frustum = new THREE.Frustum()
-const _projScreenMatrix = new THREE.Matrix4()
 
 const scheduleProgressiveRefine = () => {
   if (_refineRAF) cancelAnimationFrame(_refineRAF)
   if (!_lodAutoMode) return
   const step = () => {
     if (!previewPipe || !camera || !_lodAutoMode) return
-    _projScreenMatrix.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse)
-    _frustum.setFromProjectionMatrix(_projScreenMatrix)
-    // 收集需要升级的管道，可见的优先
-    let target = null
-    let fallback = null
-    for (const child of previewPipe.children) {
-      const ud = child.userData
-      if (!ud._originalParams || ud._lodSegments >= ud._targetSegments) continue
-      if (child.geometry?.boundingSphere !== undefined && _frustum.intersectsObject(child)) { target = child; break }
-      if (!fallback) fallback = child
+    const n = previewPipe.children.length
+    if (!n) {
+      _refineRAF = null
+      return
     }
-    const toRefine = target || fallback
+    let toRefine = null
+    let scanned = 0
+    while (scanned < n) {
+      const child = previewPipe.children[_lodRefineCursor % n]
+      _lodRefineCursor = (_lodRefineCursor + 1) % n
+      scanned++
+      const ud = child.userData
+      if (ud._originalParams && ud._lodSegments < ud._targetSegments) {
+        toRefine = child
+        break
+      }
+    }
     if (toRefine) {
       refinePipeObject(toRefine)
+      // 更新代理网格
+      updateBatchedProxyMatrices(toRefine.userData.assemblyItemId)
       _refineRAF = requestAnimationFrame(step)
     } else {
       _refineRAF = null
@@ -2462,14 +2654,13 @@ const updateAssemblyView = (items, preserveCamera = false) => {
           paramsWithType.pathData3d = item.params.pathData3d
         }
 
-        // LOD: 低精度优先
-        const targetSeg = Math.min(paramsWithType.segments || 8, 8)
-        const lodParams = { ...paramsWithType, segments: 3 }
-        const newPipeObj = createPipeObject(lodParams, item.id)
-        if (newPipeObj) {
-          newPipeObj.userData._lodSegments = 3
-          newPipeObj.userData._targetSegments = targetSeg
-          newPipeObj.userData._originalParams = paramsWithType
+        // 构建管件（若使用 BatchedMesh，直接按目标精度生成，因为极少的 DrawCall 可以轻松承担数百万面）
+        const targetSeg = paramsWithType.segments || 12
+        const pipeObj = createPipeObject(paramsWithType, item.id)
+        if (pipeObj) {
+          pipeObj.userData._lodSegments = targetSeg
+          pipeObj.userData._targetSegments = targetSeg
+          pipeObj.userData._originalParams = paramsWithType
           // 为管道启用阴影
           enableShadowsForObject(newPipeObj)
           if (item.position) {
@@ -2504,6 +2695,9 @@ const updateAssemblyView = (items, preserveCamera = false) => {
     previewPipe.updateMatrix()
     previewPipe.updateMatrixWorld(true)
 
+    freezePreviewPipeMatrices()
+    requestShadowUpdate()
+    buildBatchedProxy(previewPipe, scene, shadowsGloballyEnabled)
     scheduleProgressiveRefine()
     return
   }
@@ -2533,12 +2727,11 @@ const updateAssemblyView = (items, preserveCamera = false) => {
       paramsWithType.pathData3d = item.params.pathData3d
     }
 
-    // LOD: 低精度优先
+    // 构建管件（若使用 BatchedMesh，直接按目标精度生成）
     const targetSeg = paramsWithType.segments || 12
-    const lodParams = { ...paramsWithType, segments: 3 }
-    const pipeObj = createPipeObject(lodParams, item.id)
+    const pipeObj = createPipeObject(paramsWithType, item.id)
     if (pipeObj) {
-      pipeObj.userData._lodSegments = 3
+      pipeObj.userData._lodSegments = targetSeg
       pipeObj.userData._targetSegments = targetSeg
       pipeObj.userData._originalParams = paramsWithType
       // 为管道启用阴影
@@ -2561,6 +2754,7 @@ const updateAssemblyView = (items, preserveCamera = false) => {
   
   previewPipe = assemblyGroup
   scene.add(previewPipe)
+  previewPipe.updateMatrixWorld(true)
   
   // 只有在不保持相机时才自动调整相机
   if (!preserveCamera && camera && controls) {
@@ -2577,6 +2771,10 @@ const updateAssemblyView = (items, preserveCamera = false) => {
     controls.update()
   }
 
+  _lodRefineCursor = 0
+  freezePreviewPipeMatrices()
+  requestShadowUpdate()
+  buildBatchedProxy(previewPipe, scene, shadowsGloballyEnabled)
   scheduleProgressiveRefine()
 }
 
@@ -2676,7 +2874,9 @@ const handleLodModeChange = (event) => {
       child.rotation.copy(rot)
       ud._lodSegments = segments
       ud._targetSegments = segments
+      enableShadowsForObject(child)
     }
+    freezePreviewPipeMatrices()
   }
 }
 
@@ -2743,6 +2943,8 @@ const performJoin = (firstEndFace, secondEndFace, moveFirst, rotationAngle) => {
         }
       }
     }))
+    
+    updateBatchedProxyMatrices(assemblyItemId)
   }
   
   // 重置选择并清除高亮
@@ -2769,6 +2971,12 @@ const performJoin = (firstEndFace, secondEndFace, moveFirst, rotationAngle) => {
       }
     }
   }))
+
+  pipeToMove.updateMatrixWorld(true)
+  if (isAssemblyMode && previewPipe) {
+    freezePreviewPipeMatrices()
+    buildBatchedProxy(previewPipe, scene, shadowsGloballyEnabled)
+  }
 }
 
 // 保存原始位置和旋转（用于预览恢复）
@@ -3165,6 +3373,8 @@ const handleAssemblyItemRotationUpdate = (event) => {
     // 强制更新对象矩阵，确保实时渲染
     pipeGroup.updateMatrix()
     pipeGroup.updateMatrixWorld(true)
+    freezeObjectSubtree(pipeGroup)
+    requestShadowUpdate()
   }
 }
 
@@ -3203,7 +3413,9 @@ const handleApplyRotation = (event) => {
     // 强制更新对象矩阵，确保实时渲染
     pipeGroup.updateMatrix()
     pipeGroup.updateMatrixWorld(true)
-    
+    freezeObjectSubtree(pipeGroup)
+    requestShadowUpdate()
+
     // 同步更新数据
     window.dispatchEvent(new CustomEvent('assembly-item-rotation-updated', {
       detail: {
@@ -3215,6 +3427,8 @@ const handleApplyRotation = (event) => {
         }
       }
     }))
+    
+    updateBatchedProxyMatrices(id)
     
     // 保存操作记录
     const endRotation = {
@@ -3243,14 +3457,17 @@ const removeTransparentObjects = (object) => {
     // 递归处理子对象
     removeTransparentObjects(child)
     
-    // 检查是否是透明对象（hitbox）
-    if (child instanceof THREE.Mesh && child.material) {
+    // 检查是否是透明对象（hitbox）或者代理逻辑层（图层2）的隐藏物体
+    // 导出时，我们只需要外表面的几何体
+    if (child instanceof THREE.Mesh) {
+      if (child.layers.test(2)) {
+        // 恢复到可见图层以便正确导出（如果不恢复，导出时可能会忽略）
+        child.layers.set(0)
+      }
+      
       const material = child.material
-      // 检查是否是完全透明的对象（用于点击检测的 hitbox）
-      if (material.transparent && material.opacity === 0) {
-        // 移除透明对象
+      if (material && material.transparent && material.opacity === 0) {
         object.remove(child)
-        // 清理资源
         if (child.geometry) child.geometry.dispose()
         if (child.material) child.material.dispose()
         continue
@@ -3291,6 +3508,7 @@ onMounted(async () => {
   window.addEventListener('reset-camera', handleResetCamera)
   window.addEventListener('switch-camera', switchCamera)
   window.addEventListener('switch-renderer', switchRenderer)
+  window.addEventListener('shadows-setting', handleShadowsSetting)
   window.addEventListener('update-pipe-preview', handlePipeParamsUpdate)
   window.addEventListener('view-part', handleViewPart)
   window.addEventListener('clear-pipe-preview', handleClearPreview)
@@ -3358,6 +3576,7 @@ onUnmounted(() => {
   window.removeEventListener('reset-camera', handleResetCamera)
   window.removeEventListener('switch-camera', switchCamera)
   window.removeEventListener('switch-renderer', switchRenderer)
+  window.removeEventListener('shadows-setting', handleShadowsSetting)
   window.removeEventListener('update-pipe-preview', handlePipeParamsUpdate)
   window.removeEventListener('view-part', handleViewPart)
   window.removeEventListener('clear-pipe-preview', handleClearPreview)

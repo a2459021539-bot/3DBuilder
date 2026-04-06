@@ -3,7 +3,8 @@ import {
   createEndCapMaterial, 
   createEndCapGeometry, 
   createHitboxGeometry,
-  setupEndFaceUserData 
+  setupEndFaceUserData,
+  getHitboxMaterial
 } from './pipeCommon.js'
 
 // 创建直管
@@ -53,12 +54,7 @@ export function createStraightPipe(params, pipeMaterial, assemblyItemId) {
   // 创建不可见的辅助点击区域（实心圆盘，覆盖整个端面，包括中间的孔）
   // 稍微大一点点 (1.1倍) 以便更容易点击
   // 注意：visible: false 的物体不能被射线检测到，所以必须 visible: true 但 opacity: 0
-  const hitboxMaterial = new THREE.MeshBasicMaterial({ 
-    color: 0xff0000,
-    transparent: true,
-    opacity: 0,
-    side: THREE.DoubleSide
-  })
+  const hitboxMaterial = getHitboxMaterial()
   
   const frontHitboxGeometry = createHitboxGeometry(outerRadius * 1.1, -halfLength, false, radialSegments)
   const backHitboxGeometry = createHitboxGeometry(outerRadius * 1.1, halfLength, true, radialSegments)

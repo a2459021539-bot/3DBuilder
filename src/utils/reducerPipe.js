@@ -3,7 +3,8 @@ import {
   createEndCapMaterial, 
   createEndCapGeometry, 
   createHitboxGeometry,
-  setupEndFaceUserData 
+  setupEndFaceUserData,
+  getHitboxMaterial
 } from './pipeCommon.js'
 
 // 创建变径管
@@ -107,12 +108,7 @@ export function createReducerPipe(params, pipeMaterial, assemblyItemId) {
   setupEndFaceUserData(frontCap, 'front', new THREE.Vector3(0, firstY, 0), new THREE.Vector3(0, -1, 0), assemblyItemId)
   
   const frontHitboxGeometry = createHitboxGeometry(firstOuterRadius * 1.1, firstY, false, radialSegments)
-  const hitboxMaterial = new THREE.MeshBasicMaterial({ 
-    color: 0xff0000,
-    transparent: true,
-    opacity: 0,
-    side: THREE.DoubleSide
-  })
+  const hitboxMaterial = getHitboxMaterial()
   const frontHitbox = new THREE.Mesh(frontHitboxGeometry, hitboxMaterial)
   setupEndFaceUserData(frontHitbox, 'front', new THREE.Vector3(0, firstY, 0), new THREE.Vector3(0, -1, 0), assemblyItemId)
   

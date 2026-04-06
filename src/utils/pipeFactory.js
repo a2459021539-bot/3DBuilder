@@ -47,17 +47,15 @@ export function createPipeObject(params, assemblyItemId = null) {
   // 修复: 确保装配体ID正确设置
   if (assemblyItemId) {
     pipeGroup.userData.assemblyItemId = assemblyItemId
-    
-    // 修复: 为所有子对象设置装配体ID和阴影属性
-    pipeGroup.traverse((child) => {
-      if (child instanceof THREE.Mesh) {
-        child.userData.assemblyItemId = assemblyItemId
-        // 修复: 确保阴影设置正确
-        child.castShadow = true
-        child.receiveShadow = true
-      }
-    })
   }
+  pipeGroup.traverse((child) => {
+    if (child instanceof THREE.Mesh) {
+      if (child.material && child.material.transparent && child.material.opacity === 0) {
+        child.layers.set(1) // hitbox：只用于射线检测
+      }
+      if (assemblyItemId) child.userData.assemblyItemId = assemblyItemId
+    }
+  })
   
   return pipeGroup
 }

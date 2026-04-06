@@ -3,7 +3,8 @@ import {
   createPipeMaterial,
   createEndCapMaterial,
   createPipeSection,
-  setupEndFaceUserData
+  setupEndFaceUserData,
+  getHitboxMaterial
 } from './pipeCommon.js'
 
 // 3D路径曲线类
@@ -183,7 +184,7 @@ export function createSketch3DPipe(params, assemblyItemId = null) {
 
   // 端面
   const endCapMaterial = createEndCapMaterial()
-  const hitboxMaterial = new THREE.MeshBasicMaterial({ color: 0xff0000, transparent: true, opacity: 0, side: THREE.DoubleSide })
+  const hitboxMaterial = getHitboxMaterial()
 
   const startPoint = new THREE.Vector3()
   pathCurve.getPoint(0, startPoint)
