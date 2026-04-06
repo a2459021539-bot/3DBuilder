@@ -9,7 +9,9 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "three": "^0.161.0",
+    "sql.js": "^1.14.1",
+    "stats.js": "^0.17.0",
+    "three": "^0.183.2",
     "vue": "^3.4.21",
     "xlsx": "^0.18.5"
   },

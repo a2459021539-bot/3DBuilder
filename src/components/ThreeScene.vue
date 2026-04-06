@@ -11,27 +11,60 @@
     
     <!-- 3D场景 -->
     <div ref="containerRef" class="three-container" :class="{ 'split-view': isSplitView }"></div>
+    <!-- 比例尺 -->
+    <div ref="scaleBarRef" class="scale-bar">
+      <div class="scale-bar-ruler" :style="{ width: scaleBarWidth + 'px' }">
+        <div class="scale-bar-track"></div>
+        <div v-for="(tick, i) in scaleBarTicks" :key="i" class="scale-bar-tick" :style="{ left: tick.pct + '%' }">
+          <div class="scale-bar-tick-line"></div>
+          <span v-if="tick.label" class="scale-bar-tick-label">{{ tick.label }}</span>
+        </div>
+      </div>
+    </div>
+    <!-- 3D草图工具栏 -->
+    <div v-if="isSketch3DMode" class="sketch3d-toolbar">
+      <div class="sketch3d-toolbar-group">
+        <span class="sketch3d-label">模式</span>
+        <button :class="['sketch3d-btn', { active: sketch3DDrawMode === 'line' }]" @click="sketch3DDrawMode = 'line'">直线</button>
+        <button :class="['sketch3d-btn', { active: sketch3DDrawMode === 'arc' }]" @click="sketch3DDrawMode = 'arc'">圆弧</button>
+      </div>
+      <div class="sketch3d-toolbar-group">
+        <span class="sketch3d-label">平面</span>
+        <button :class="['sketch3d-btn', { active: sketch3DWorkingPlane === 'XZ' }]" @click="sketch3DWorkingPlane = 'XZ'; sketch3DUpdateGrid()">XZ</button>
+        <button :class="['sketch3d-btn', { active: sketch3DWorkingPlane === 'XY' }]" @click="sketch3DWorkingPlane = 'XY'; sketch3DUpdateGrid()">XY</button>
+        <button :class="['sketch3d-btn', { active: sketch3DWorkingPlane === 'YZ' }]" @click="sketch3DWorkingPlane = 'YZ'; sketch3DUpdateGrid()">YZ</button>
+      </div>
+      <div class="sketch3d-toolbar-group">
+        <button class="sketch3d-btn" @click="sketch3DUndo()">撤销</button>
+        <button class="sketch3d-btn" @click="sketch3DClear()">清除</button>
+        <button class="sketch3d-btn sketch3d-btn-confirm" @click="sketch3DConfirm()">确认</button>
+      </div>
+    </div>
   </div>
 </template>
 
 <script setup>
 import { ref, onMounted, onUnmounted } from 'vue'
 import * as THREE from 'three'
+import { WebGPURenderer } from 'three/webgpu'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
 import { TransformControls } from 'three/addons/controls/TransformControls.js'
 import { createPipeObject } from '../utils/pipeFactory.js'
 import { createSketch2DPipe } from '../utils/sketch2dPipe.js'
+import { createSketch3DPipe } from '../utils/sketch3dPipe.js'
 import Sketch2DCanvas from './Sketch2DCanvas.vue'
 import { ExportManager } from '../utils/exportManager.js'
+import Stats from 'stats.js'
 
 const containerRef = ref(null)
+let stats = null
 let scene = null
 let camera = null
 let renderer = null
 let controls = null
 let transformControl = null
-let animationId = null
 let isPerspective = true // 当前是否为透视相机
+const isWebGPU = ref(false) // 当前是否使用WebGPU渲染
 let previewPipe = null // 预览直管对象
 let isAssemblyMode = false // 当前是否处于装配体模式
 let isRotationMode = false // 当前是否处于旋转模式
@@ -49,6 +82,20 @@ const sketch2DPipeParams = ref(null) // 2D草图管道参数
 const initialSketchPathData = ref(null) // 初始路径数据（用于编辑时加载已有路径）
 let isArrayMode = false // 是否处于阵列模式
 const selectionHighlightMap = new Map() // 存储多选高亮的原始材质（统一用于所有选择）
+
+// 3D草图状态
+const isSketch3DMode = ref(false)
+const sketch3DDrawMode = ref('line')
+const sketch3DWorkingPlane = ref('XZ')
+let sketch3DSegments = []
+let sketch3DLastPoint = null
+let sketch3DPreviewGroup = null
+let sketch3DGridHelper = null
+let sketch3DPipeParams = null
+let sketch3DArcState = 'start'
+let sketch3DArcStartPoint = null
+let sketch3DArcEndPoint = null
+const sketch3DSnapSize = 5 // 吸附步长 mm
 
 // 动态菜单宽度
 let currentMenuWidth = 250
@@ -124,111 +171,268 @@ const addAxisLabels = (scene) => {
   scene.add(zSprite)
 }
 
-// 创建自定义网格系统（以1mm为单位）
-const createCustomGrid = (scene) => {
-  const gridSize = 100 // 网格总大小：100mm
-  const divisions = 100 // 100个1mm的格子
-  
-  // 1mm 细网格线（浅灰色，细线）
-  const grid1mm = new THREE.GridHelper(gridSize, divisions, 0x444444, 0x333333)
-  grid1mm.material.opacity = 0.3
-  grid1mm.material.transparent = true
-  scene.add(grid1mm)
-  
-  // 5mm 中等网格线（中灰色，稍粗）
-  const grid5mm = new THREE.GridHelper(gridSize, divisions / 5, 0x666666, 0x555555)
-  grid5mm.material.opacity = 0.5
-  grid5mm.material.transparent = true
-  scene.add(grid5mm)
-  
-  // 10mm 粗网格线（亮灰色，粗线）
-  const grid10mm = new THREE.GridHelper(gridSize, divisions / 10, 0x888888, 0x777777)
-  grid10mm.material.opacity = 0.7
-  grid10mm.material.transparent = true
-  scene.add(grid10mm)
-  
-  // 添加10mm标注文字（在X轴和Z轴上）
-  const labelDistance = gridSize / 2 + 2 // 标签距离网格边缘2mm
-  const step = 10 // 每10mm一个标注
-  
-  // X轴正方向标注
-  for (let i = step; i <= gridSize / 2; i += step) {
-    if (i % 10 === 0) {
-      const texture = createTextTexture(`${i}mm`)
-      const spriteMaterial = new THREE.SpriteMaterial({ map: texture })
-      const sprite = new THREE.Sprite(spriteMaterial)
-      sprite.position.set(i, 0.1, 0)
-      sprite.scale.set(4, 1, 1)
-      scene.add(sprite)
-    }
+// 动态网格系统 - 根据相机距离自适应
+let gridGroup = null
+/** WebGPU 上一帧 queue.submit 可能仍引用网格 buffer，同帧 remove + dispose 会触发 “used in submit while destroyed” */
+const pendingGridDisposals = []
+const GRID_DISPOSE_DELAY_MS = 3000
+const safeDisposeGridGroup = (group) => {
+  if (!group) return
+  try {
+    group.traverse((c) => {
+      if (c.geometry) { try { c.geometry.dispose() } catch (_) {} }
+      if (c.material) {
+        const mats = Array.isArray(c.material) ? c.material : [c.material]
+        for (const m of mats) {
+          if (m.map) { try { m.map.dispose() } catch (_) {} }
+          try { m.dispose() } catch (_) {}
+        }
+      }
+    })
+  } catch (_) {}
+}
+const waitForRendererQueueIdle = async (targetRenderer = renderer) => {
+  const queue = targetRenderer?.backend?.device?.queue
+  if (!queue?.onSubmittedWorkDone) return
+  try {
+    await queue.onSubmittedWorkDone()
+  } catch (_) {}
+}
+const scheduleGridGroupDisposal = (group) => {
+  if (!group) return
+  group.visible = false
+
+  const isWebGPUBackend = renderer?.backend?.isWebGPUBackend === true
+  if (isWebGPUBackend) {
+    const entry = { group, cancelled: false }
+    pendingGridDisposals.push(entry)
+    waitForRendererQueueIdle(renderer).then(() => {
+      if (entry.cancelled) return
+      const idx = pendingGridDisposals.indexOf(entry)
+      if (idx !== -1) pendingGridDisposals.splice(idx, 1)
+      if (group.parent) group.parent.remove(group)
+      safeDisposeGridGroup(group)
+    })
+    return
   }
-  
-  // X轴负方向标注
-  for (let i = -step; i >= -gridSize / 2; i -= step) {
-    if (i % 10 === 0) {
-      const texture = createTextTexture(`${Math.abs(i)}mm`)
-      const spriteMaterial = new THREE.SpriteMaterial({ map: texture })
-      const sprite = new THREE.Sprite(spriteMaterial)
-      sprite.position.set(i, 0.1, 0)
-      sprite.scale.set(4, 1, 1)
-      scene.add(sprite)
-    }
-  }
-  
-  // Z轴正方向标注
-  for (let i = step; i <= gridSize / 2; i += step) {
-    if (i % 10 === 0) {
-      const texture = createTextTexture(`${i}mm`)
-      const spriteMaterial = new THREE.SpriteMaterial({ map: texture })
-      const sprite = new THREE.Sprite(spriteMaterial)
-      sprite.position.set(0, 0.1, i)
-      sprite.scale.set(4, 1, 1)
-      sprite.rotation.y = Math.PI / 2
-      scene.add(sprite)
-    }
-  }
-  
-  // Z轴负方向标注
-  for (let i = -step; i >= -gridSize / 2; i -= step) {
-    if (i % 10 === 0) {
-      const texture = createTextTexture(`${Math.abs(i)}mm`)
-      const spriteMaterial = new THREE.SpriteMaterial({ map: texture })
-      const sprite = new THREE.Sprite(spriteMaterial)
-      sprite.position.set(0, 0.1, i)
-      sprite.scale.set(4, 1, 1)
-      sprite.rotation.y = Math.PI / 2
-      scene.add(sprite)
-    }
-  }
-  
-  // 添加5mm特殊标记（短线标记，更明显）
-  for (let i = -gridSize / 2; i <= gridSize / 2; i += 5) {
-    if (i % 10 !== 0 && i !== 0) {
-      // 在X轴上添加5mm标记（垂直于X轴的短线）
-      const markerXGeometry = new THREE.BoxGeometry(0.15, 0.02, 1)
-      const markerX = new THREE.Mesh(
-        markerXGeometry,
-        new THREE.MeshBasicMaterial({ color: 0xaaaaaa })
-      )
-      markerX.position.set(i, 0.05, 0)
-      scene.add(markerX)
-      
-      // 在Z轴上添加5mm标记（垂直于Z轴的短线）
-      const markerZGeometry = new THREE.BoxGeometry(1, 0.02, 0.15)
-      const markerZ = new THREE.Mesh(
-        markerZGeometry,
-        new THREE.MeshBasicMaterial({ color: 0xaaaaaa })
-      )
-      markerZ.position.set(0, 0.05, i)
-      scene.add(markerZ)
+
+  pendingGridDisposals.push({ group, time: performance.now(), cancelled: false })
+}
+const tickPendingGridDisposals = () => {
+  if (pendingGridDisposals.length === 0) return
+  const now = performance.now()
+  for (let i = pendingGridDisposals.length - 1; i >= 0; i--) {
+    const e = pendingGridDisposals[i]
+    if (!e || !e.group) { pendingGridDisposals.splice(i, 1); continue }
+    if (e.cancelled) { pendingGridDisposals.splice(i, 1); continue }
+    if (!('time' in e)) continue
+    if (now - e.time >= GRID_DISPOSE_DELAY_MS) {
+      if (e.group.parent) e.group.parent.remove(e.group)
+      safeDisposeGridGroup(e.group)
+      pendingGridDisposals.splice(i, 1)
     }
   }
 }
+const flushPendingGridDisposals = () => {
+  for (const e of pendingGridDisposals) {
+    if (!e?.group) continue
+    e.cancelled = true
+    if (e.group.parent) e.group.parent.remove(e.group)
+    safeDisposeGridGroup(e.group)
+  }
+  pendingGridDisposals.length = 0
+}
+const disposeGridGroupImmediate = (group) => { safeDisposeGridGroup(group) }
+let lastGridStep = 0
+let lastGridCenter = new THREE.Vector3()
+let lastScaleBarWorld = 0
+const scaleBarRef = ref(null)
+const scaleBarText = ref('')
+const scaleBarWidth = ref(100)
+const scaleBarTicks = ref([])
 
-const initThree = () => {
+// 计算合适的网格步长（1, 2, 5, 10, 20, 50, ...）
+const niceStep = (rough) => {
+  const pow = Math.pow(10, Math.floor(Math.log10(rough)))
+  const frac = rough / pow
+  if (frac <= 1) return pow
+  if (frac <= 2) return 2 * pow
+  if (frac <= 5) return 5 * pow
+  return 10 * pow
+}
+
+const formatLength = (mm) => {
+  if (mm >= 1000) return `${(mm / 1000).toFixed(mm % 1000 === 0 ? 0 : 1)}m`
+  return `${mm}mm`
+}
+
+const updateDynamicGrid = () => {
+  if (!scene || !camera) return
+
+  const target = controls ? controls.target : new THREE.Vector3()
+  const dist = camera.position.distanceTo(target)
+  const step = niceStep(dist / 10)
+  const cx = Math.round(target.x / step) * step
+  const cz = Math.round(target.z / step) * step
+
+  const isWebGPUBackend = renderer?.backend?.isWebGPUBackend === true
+  // WebGPU：three.js 当前版本在「每帧/交互后 dispose + 重建」时仍易触发 buffer 在 submit 时已销毁。
+  // 可靠规避：真 WebGPU 后端下地面网格只创建一次，之后只更新比例尺（功能取舍，换稳定性）。
+  if (isWebGPUBackend && gridGroup) {
+    updateScaleBar()
+    return
+  }
+
+  // 只在步长或中心位置变化时重建网格（WebGL 或 WebGPU 首次建网格）
+  if (!isWebGPUBackend && step === lastGridStep && Math.abs(cx - lastGridCenter.x) < step * 0.5 && Math.abs(cz - lastGridCenter.z) < step * 0.5) {
+    updateScaleBar()
+    return
+  }
+  lastGridStep = step
+  lastGridCenter.set(cx, 0, cz)
+
+  // WebGL：旧网格延后释放；WebGPU 首次建网格前不应有旧 gridGroup（若从 WebGL 切来则下面会处理）
+  if (gridGroup) {
+    scheduleGridGroupDisposal(gridGroup)
+  }
+  gridGroup = new THREE.Group()
+  gridGroup.name = 'dynamicGrid'
+
+  const gridExtent = step * 20
+
+  // 细网格
+  const fineGrid = new THREE.GridHelper(gridExtent, gridExtent / step, 0x444444, 0x333333)
+  fineGrid.material.opacity = 0.25
+  fineGrid.material.transparent = true
+  fineGrid.position.set(cx, 0, cz)
+  gridGroup.add(fineGrid)
+
+  // 粗网格（5x step）
+  const coarseStep = step * 5
+  const coarseGrid = new THREE.GridHelper(gridExtent, gridExtent / coarseStep, 0x666666, 0x555555)
+  coarseGrid.material.opacity = 0.5
+  coarseGrid.material.transparent = true
+  coarseGrid.position.set(cx, 0, cz)
+  gridGroup.add(coarseGrid)
+
+  // 地面刻度标注 — 沿粗网格线标注坐标值
+  const half = gridExtent / 2
+  const labelScale = step * 2
+  for (let i = -half; i <= half; i += coarseStep) {
+    const wx = cx + i
+    const wz = cz + i
+    if (Math.abs(wx) > 0.001 || Math.abs(i) < 0.001) {
+      const tex = createTextTexture(formatLength(Math.abs(wx)))
+      const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, depthTest: false }))
+      s.position.set(wx, 0.1, cz - half - step)
+      s.scale.set(labelScale, labelScale * 0.25, 1)
+      gridGroup.add(s)
+    }
+    if (Math.abs(wz) > 0.001 || Math.abs(i) < 0.001) {
+      const tex = createTextTexture(formatLength(Math.abs(wz)))
+      const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, depthTest: false }))
+      s.position.set(cx - half - step, 0.1, wz)
+      s.scale.set(labelScale, labelScale * 0.25, 1)
+      gridGroup.add(s)
+    }
+  }
+
+  scene.add(gridGroup)
+  updateScaleBar()
+}
+
+const updateScaleBar = () => {
+  if (!camera || !renderer) return
+  // 用屏幕中心两点反投影计算世界单位/像素，不依赖controls.target
+  const h = renderer.domElement.clientHeight
+  const w = renderer.domElement.clientWidth
+  if (h === 0 || w === 0) return
+
+  const p1 = new THREE.Vector3(0, 0, 0.5).unproject(camera)
+  const p2 = new THREE.Vector3(1 / w, 0, 0.5).unproject(camera) // 偏移1像素
+  const worldPerPixel = p1.distanceTo(p2)
+  if (worldPerPixel === 0) return
+
+  const barWorld = niceStep(worldPerPixel * 150)
+
+  if (barWorld === lastScaleBarWorld) return
+  lastScaleBarWorld = barWorld
+
+  scaleBarWidth.value = Math.round(barWorld / worldPerPixel)
+
+  const divisions = 5
+  const ticks = []
+  for (let i = 0; i <= divisions; i++) {
+    const pct = (i / divisions) * 100
+    const val = barWorld * i / divisions
+    const label = (i === 0 || i === divisions) ? formatLength(val) : null
+    ticks.push({ pct, label })
+  }
+  scaleBarTicks.value = ticks
+}
+
+const initThree = async () => {
   // 创建场景
   scene = new THREE.Scene()
   scene.background = new THREE.Color(0x1a1a1a)
+
+  // 初始化性能监控 - 3个面板同时显示，可拖拽，可收纳
+  const statsPanel = document.createElement('div')
+  statsPanel.id = 'stats-panel'
+  statsPanel.style.cssText = 'position:absolute;top:60px;right:0;z-index:100;user-select:none;background:rgba(0,0,0,0.85);border-radius:4px;overflow:hidden;'
+  // 拖拽标题栏
+  const titleBar = document.createElement('div')
+  titleBar.style.cssText = 'height:16px;cursor:move;display:flex;align-items:center;justify-content:flex-end;padding:0 4px;background:rgba(255,255,255,0.1);'
+  const collapseBtn = document.createElement('span')
+  collapseBtn.style.cssText = 'cursor:pointer;color:#aaa;font-size:14px;line-height:16px;'
+  collapseBtn.textContent = '−'
+  titleBar.appendChild(collapseBtn)
+  statsPanel.appendChild(titleBar)
+  // 面板容器
+  const panelsRow = document.createElement('div')
+  panelsRow.style.cssText = 'display:flex;'
+  const panels = [0, 1, 2] // FPS, MS, MB
+  panels.forEach(i => {
+    const s = new Stats()
+    s.showPanel(i)
+    const canvas = s.dom.children[i]
+    if (canvas) { canvas.style.cssText = 'width:100px;height:60px;display:block;' }
+    const wrapper = document.createElement('div')
+    wrapper.style.cssText = 'width:100px;height:60px;overflow:hidden;pointer-events:none;'
+    wrapper.appendChild(canvas)
+    panelsRow.appendChild(wrapper)
+    if (i === 0) stats = s
+    else if (i === 1) stats._ms = s
+    else stats._mb = s
+  })
+  statsPanel.appendChild(panelsRow)
+  // 零件数/面数信息栏
+  const statsInfo = document.createElement('div')
+  statsInfo.style.cssText = 'color:#ccc;font-size:12px;font-family:monospace;padding:4px 8px;white-space:nowrap;'
+  statsPanel.appendChild(statsInfo)
+  stats._info = statsInfo
+  // 收纳小圆球
+  const statsBall = document.createElement('div')
+  statsBall.id = 'stats-ball'
+  statsBall.style.cssText = 'position:absolute;top:60px;right:0;width:24px;height:24px;background:rgba(0,180,0,0.8);border-radius:50%;cursor:pointer;z-index:100;display:none;user-select:none;'
+  statsBall.title = '展开性能面板'
+  // 收纳/展开
+  collapseBtn.addEventListener('click', () => { const r = collapseBtn.getBoundingClientRect(); const pr = parentEl.getBoundingClientRect(); statsPanel.style.display = 'none'; statsBall.style.display = 'block'; statsBall.style.left = (r.left - pr.left) + 'px'; statsBall.style.top = (r.top - pr.top) + 'px'; statsBall.style.right = 'auto' })
+  statsBall.addEventListener('click', () => { statsBall.style.display = 'none'; statsPanel.style.display = 'block' })
+  // 拖拽面板
+  let _pd = false, _px = 0, _py = 0
+  titleBar.addEventListener('mousedown', e => { _pd = true; _px = e.clientX - statsPanel.offsetLeft; _py = e.clientY - statsPanel.offsetTop; e.preventDefault() })
+  // 拖拽圆球
+  let _bd = false, _bx = 0, _by = 0
+  statsBall.addEventListener('mousedown', e => { if (e.detail > 0) { _bd = true; _bx = e.clientX - statsBall.offsetLeft; _by = e.clientY - statsBall.offsetTop; e.preventDefault() } })
+  document.addEventListener('mousemove', e => {
+    if (_pd) { statsPanel.style.left = (e.clientX - _px) + 'px'; statsPanel.style.top = (e.clientY - _py) + 'px'; statsPanel.style.right = 'auto' }
+    if (_bd) { statsBall.style.left = (e.clientX - _bx) + 'px'; statsBall.style.top = (e.clientY - _by) + 'px'; statsBall.style.right = 'auto' }
+  })
+  document.addEventListener('mouseup', () => { _pd = false; _bd = false })
+  const parentEl = containerRef.value.parentElement
+  parentEl.appendChild(statsPanel)
+  parentEl.appendChild(statsBall)
 
   // 创建相机
   camera = new THREE.PerspectiveCamera(
@@ -237,15 +441,16 @@ const initThree = () => {
     0.1,
     10000
   )
-  camera.position.z = 5
+  camera.position.set(5, 5, 5)
 
-  // 创建渲染器
-  renderer = new THREE.WebGLRenderer({ antialias: true })
+  // 创建渲染器（统一使用 WebGPURenderer，默认 WebGL 后端）
+  renderer = new WebGPURenderer({ antialias: true, powerPreference: 'high-performance', forceWebGL: true })
+  await renderer.init()
   renderer.setSize(window.innerWidth, window.innerHeight)
   renderer.setPixelRatio(window.devicePixelRatio)
   // 启用阴影映射
   renderer.shadowMap.enabled = true
-  renderer.shadowMap.type = THREE.PCFSoftShadowMap
+  renderer.shadowMap.type = THREE.PCFShadowMap
   containerRef.value.appendChild(renderer.domElement)
 
   // 添加环境光
@@ -268,8 +473,8 @@ const initThree = () => {
   directionalLight.shadow.bias = -0.0001
   scene.add(directionalLight)
 
-  // 创建自定义网格系统（以1mm为单位）
-  createCustomGrid(scene)
+  // 创建动态网格系统
+  updateDynamicGrid()
 
   // 添加坐标轴辅助线（增大长度使其更明显）
   const axesHelper = new THREE.AxesHelper(20)
@@ -291,7 +496,7 @@ const initThree = () => {
   transformControl.size = 0.9
   transformControl.visible = false
   transformControl.enabled = false
-  scene.add(transformControl)
+  scene.add(transformControl.getHelper())
 
   // 旋转交互事件
   transformControl.addEventListener('dragging-changed', (event) => {
@@ -370,15 +575,40 @@ const initThree = () => {
   animate()
 }
 
-const animate = () => {
-  animationId = requestAnimationFrame(animate)
+let _statsInfoTimer = 0
+const animateLoop = () => {
+  if (stats) { stats.begin(); if (stats._ms) stats._ms.begin(); if (stats._mb) stats._mb.begin() }
 
-  // 更新控制器（需要每帧调用，特别是启用了阻尼时）
   if (controls) {
     controls.update()
   }
 
+  updateDynamicGrid()
+
   renderer.render(scene, camera)
+  // 必须在 render/submit 之后再 dispose 旧网格，避免 WebGPU 与 Three 内部缓存竞态（移动相机时高频重建网格）
+  tickPendingGridDisposals()
+  // FPS 自适应 LOD
+  _fpsFrames++
+  const now = performance.now()
+  if (now - _fpsLastTime >= 1000) {
+    _fpsValue = _fpsFrames
+    _fpsFrames = 0
+    _fpsLastTime = now
+    if (_lodAutoMode && _fpsValue < 20 && previewPipe) degradeLod()
+  }
+  if (stats) {
+    stats.end(); if (stats._ms) stats._ms.end(); if (stats._mb) stats._mb.end()
+    if (stats._info && ++_statsInfoTimer % 30 === 0) {
+      let meshes = 0, tris = 0
+      scene.traverse(o => { if (o.isMesh && o.visible && o.userData.isOuterSurface) { meshes++; const g = o.geometry; if (g) tris += g.index ? g.index.count / 3 : (g.attributes.position ? g.attributes.position.count / 3 : 0) } })
+      stats._info.textContent = `零件 ${meshes}  面 ${Math.round(tris)}`
+    }
+  }
+}
+
+const animate = () => {
+  renderer.setAnimationLoop(animateLoop)
 }
 
 const handleResize = () => {
@@ -513,6 +743,118 @@ const switchCamera = () => {
   controls.update()
 }
 
+const switchRenderer = async () => {
+  if (!renderer || !camera || !controls || !containerRef.value) return
+
+  // 先停动画并等待旧 GPU 队列清空，再清理待释放网格，避免跨 backend 的 buffer 竞态
+  renderer.setAnimationLoop(null)
+  if (renderer._animation) renderer._animation.stop()
+  await waitForRendererQueueIdle(renderer)
+  flushPendingGridDisposals()
+
+  // 保存状态
+  const pos = camera.position.clone()
+  const target = controls.target.clone()
+  const quat = camera.quaternion.clone()
+
+  // 移除旧事件和DOM
+  renderer.domElement.removeEventListener('mousedown', onMouseDown)
+  renderer.domElement.removeEventListener('mousemove', onMouseMove)
+  renderer.domElement.removeEventListener('mouseup', onMouseUp)
+  renderer.domElement.removeEventListener('click', onMouseClick)
+  containerRef.value.removeChild(renderer.domElement)
+
+  // 清理旧 controls
+  if (transformControl) {
+    scene.remove(transformControl.getHelper())
+    transformControl.dispose()
+  }
+  controls.dispose()
+
+  // 保留旧渲染器引用
+  const oldRenderer = renderer
+
+  // 创建新 renderer（统一使用 WebGPURenderer，切换后端）
+  const useGPU = !isWebGPU.value
+  renderer = new WebGPURenderer({ antialias: true, powerPreference: 'high-performance', forceWebGL: !useGPU })
+  await renderer.init()
+  if (useGPU) {
+    const adapter = renderer.backend?.adapter
+    if (adapter) {
+      const info = await adapter.requestAdapterInfo()
+      console.log('WebGPU Adapter:', info.vendor, info.architecture, info.device, info.description)
+    }
+  }
+  isWebGPU.value = useGPU
+
+  // 切回 WebGL 时丢弃当前地面网格并强制下一帧按 WebGL 逻辑重建；切到 WebGPU 则保留现有网格并进入「只建一次」模式
+  if (!useGPU) {
+    if (gridGroup) {
+      scheduleGridGroupDisposal(gridGroup)
+      gridGroup = null
+    }
+    lastGridStep = 0
+    lastGridCenter.set(0, 0, 0)
+  }
+
+  const rect = containerRef.value.getBoundingClientRect()
+  renderer.setSize(rect.width, rect.height)
+  renderer.setPixelRatio(window.devicePixelRatio)
+  if (renderer.shadowMap) {
+    renderer.shadowMap.enabled = true
+    renderer.shadowMap.type = THREE.PCFShadowMap
+  }
+  containerRef.value.appendChild(renderer.domElement)
+
+  // 重建 controls
+  controls = new OrbitControls(camera, renderer.domElement)
+  controls.enableDamping = true
+  controls.dampingFactor = 0.05
+  controls.mouseButtons = { LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.PAN }
+  controls.panSpeed = 0.8
+  controls.target.copy(target)
+
+  transformControl = new TransformControls(camera, renderer.domElement)
+  transformControl.setMode('rotate')
+  transformControl.setSpace('local')
+  transformControl.setRotationSnap(rotationSnapStep)
+  transformControl.size = 0.9
+  transformControl.visible = false
+  transformControl.enabled = false
+  scene.add(transformControl.getHelper())
+
+  // 恢复相机
+  camera.position.copy(pos)
+  camera.quaternion.copy(quat)
+  controls.update()
+
+  // 重新绑定事件
+  renderer.domElement.addEventListener('mousedown', onMouseDown)
+  renderer.domElement.addEventListener('mousemove', onMouseMove)
+  renderer.domElement.addEventListener('mouseup', onMouseUp)
+  renderer.domElement.addEventListener('click', onMouseClick)
+
+  // 如果在3D草图模式，禁用左键旋转
+  if (isSketch3DMode.value) controls.mouseButtons.LEFT = null
+
+  // 重启动画
+  animate()
+
+  // 延后释放旧渲染器，避免与上一帧 WebGPU submit 竞态（默认每个 WebGPURenderer 独立 device）
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      try {
+        oldRenderer.dispose()
+      } catch (e) {
+        console.warn('释放旧渲染器失败:', e)
+      }
+    })
+  })
+
+  // 通知App.vue更新按钮文字
+  window.dispatchEvent(new CustomEvent('renderer-switched', { detail: { type: useGPU ? 'webgpu' : 'webgl' } }))
+}
+
 const handleResetCamera = () => {
   if (camera && controls) {
     camera.position.set(0, 0, 5)
@@ -611,6 +953,7 @@ const raycaster = new THREE.Raycaster()
 const pointer = new THREE.Vector2()
 
 // 拖拽相关变量
+let isMoveMode = false
 let isDragging = false
 let draggedObject = null
 let draggedAssemblyItemId = null
@@ -943,6 +1286,19 @@ let dragStartPosition = null
 
 // 鼠标按下事件
 const onMouseDown = (event) => {
+  // 3D草图模式：左键点击放置点
+  if (isSketch3DMode.value && event.button === 0) {
+    const point = sketch3DRaycastToPlane(event)
+    if (!point) return
+    if (sketch3DDrawMode.value === 'line') {
+      sketch3DAddLineSegment(point)
+    } else {
+      sketch3DAddArcSegment(point)
+    }
+    sketch3DUpdatePreviewLines(null)
+    return
+  }
+
   // 只在装配体模式下启用拖拽/旋转
   if (!isAssemblyMode || !previewPipe || !camera || !renderer) {
     // 非装配体模式下的原有点击逻辑
@@ -1026,8 +1382,7 @@ const onMouseDown = (event) => {
           attachRotationGizmo(pipeGroup, assemblyItemId)
           event.preventDefault()
           return
-          } else {
-            // 移动模式：支持批量移动
+          } else if (isMoveMode) {
             // 检查是否有多个选中的项
             const isMultiSelect = selectedAssemblyItemIds.size > 1 && selectedAssemblyItemIds.has(assemblyItemId)
             
@@ -1120,6 +1475,13 @@ const onMouseDown = (event) => {
 
 // 鼠标移动事件
 const onMouseMove = (event) => {
+  // 3D草图模式：橡皮筋预览
+  if (isSketch3DMode.value && sketch3DLastPoint) {
+    const point = sketch3DRaycastToPlane(event)
+    if (point) sketch3DUpdatePreviewLines(point)
+    return
+  }
+
   if (isRotating && rotatedObject) {
     // 旋转模式
     const deltaY = event.clientY - rotationStartMouseY
@@ -1450,6 +1812,8 @@ const handlePipeParamsUpdate = (event) => {
       handleResize()
     }, 100)
   }
+  // 退出3D草图模式
+  if (isSketch3DMode.value) exitSketch3DMode()
   updatePipePreview(params)
 }
 
@@ -1579,6 +1943,470 @@ const handleSketch2DParamsUpdate = (event) => {
   }
 }
 
+// ========== 3D草图建管 ==========
+
+const sketch3DGetWorkingPlane = () => {
+  const p = sketch3DWorkingPlane.value
+  if (p === 'XY') return new THREE.Plane(new THREE.Vector3(0, 0, 1), 0)
+  if (p === 'YZ') return new THREE.Plane(new THREE.Vector3(1, 0, 0), 0)
+  return new THREE.Plane(new THREE.Vector3(0, 1, 0), 0) // XZ
+}
+
+const sketch3DSnap = (point) => {
+  const s = sketch3DSnapSize
+  return new THREE.Vector3(
+    Math.round(point.x / s) * s,
+    Math.round(point.y / s) * s,
+    Math.round(point.z / s) * s
+  )
+}
+
+const sketch3DRaycastToPlane = (event) => {
+  if (!renderer || !camera) return null
+  const rect = renderer.domElement.getBoundingClientRect()
+  const pointer = new THREE.Vector2(
+    ((event.clientX - rect.left) / rect.width) * 2 - 1,
+    -((event.clientY - rect.top) / rect.height) * 2 + 1
+  )
+  const raycaster = new THREE.Raycaster()
+  raycaster.setFromCamera(pointer, camera)
+  const intersection = new THREE.Vector3()
+  if (raycaster.ray.intersectPlane(sketch3DGetWorkingPlane(), intersection)) {
+    return sketch3DSnap(intersection)
+  }
+  return null
+}
+
+const sketch3DUpdateGrid = () => {
+  if (sketch3DGridHelper) {
+    scene.remove(sketch3DGridHelper)
+    sketch3DGridHelper.geometry?.dispose()
+    sketch3DGridHelper.material?.dispose()
+  }
+  const size = 200
+  const divisions = size / sketch3DSnapSize
+  sketch3DGridHelper = new THREE.GridHelper(size, divisions, 0x2266aa, 0x1a4477)
+  sketch3DGridHelper.material.opacity = 0.3
+  sketch3DGridHelper.material.transparent = true
+  const p = sketch3DWorkingPlane.value
+  if (p === 'XY') sketch3DGridHelper.rotation.x = Math.PI / 2
+  else if (p === 'YZ') sketch3DGridHelper.rotation.z = Math.PI / 2
+  scene.add(sketch3DGridHelper)
+}
+
+const sketch3DUpdatePreviewLines = (mousePoint) => {
+  if (!sketch3DPreviewGroup) {
+    sketch3DPreviewGroup = new THREE.Group()
+    sketch3DPreviewGroup.name = 'sketch3DPreview'
+    scene.add(sketch3DPreviewGroup)
+  }
+  // 清除旧预览
+  while (sketch3DPreviewGroup.children.length) {
+    const c = sketch3DPreviewGroup.children[0]
+    sketch3DPreviewGroup.remove(c)
+    c.geometry?.dispose()
+    c.material?.dispose()
+  }
+
+  const lineMat = new THREE.LineBasicMaterial({ color: 0x00ff00 })
+  const dashMat = new THREE.LineDashedMaterial({ color: 0xffff00, dashSize: 2, gapSize: 1 })
+  const pointMat = new THREE.MeshBasicMaterial({ color: 0x00ff00 })
+
+  // 绘制已确认的线段
+  sketch3DSegments.forEach(seg => {
+    if (seg.type === 'line') {
+      const geo = new THREE.BufferGeometry().setFromPoints([
+        new THREE.Vector3(seg.start.x, seg.start.y, seg.start.z),
+        new THREE.Vector3(seg.end.x, seg.end.y, seg.end.z)
+      ])
+      sketch3DPreviewGroup.add(new THREE.Line(geo, lineMat))
+    } else if (seg.type === 'arc') {
+      const pts = []
+      const steps = 32
+      for (let i = 0; i <= steps; i++) {
+        const angle = seg.startAngle + (seg.endAngle - seg.startAngle) * (i / steps)
+        const c = seg.center, r = seg.radius
+        const cos = Math.cos(angle), sin = Math.sin(angle)
+        if (seg.plane === 'XY') pts.push(new THREE.Vector3(c.x + r * cos, c.y + r * sin, c.z))
+        else if (seg.plane === 'YZ') pts.push(new THREE.Vector3(c.x, c.y + r * cos, c.z + r * sin))
+        else pts.push(new THREE.Vector3(c.x + r * cos, c.y, c.z + r * sin))
+      }
+      sketch3DPreviewGroup.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), lineMat))
+    }
+  })
+
+  // 绘制节点球
+  const allPoints = []
+  if (sketch3DSegments.length > 0) {
+    const first = sketch3DSegments[0]
+    allPoints.push(first.type === 'line' ? first.start : first.start || { x: 0, y: 0, z: 0 })
+  }
+  sketch3DSegments.forEach(seg => {
+    if (seg.type === 'line') allPoints.push(seg.end)
+    else if (seg.type === 'arc') {
+      // 圆弧终点
+      const angle = seg.endAngle, c = seg.center, r = seg.radius
+      const cos = Math.cos(angle), sin = Math.sin(angle)
+      if (seg.plane === 'XY') allPoints.push({ x: c.x + r * cos, y: c.y + r * sin, z: c.z })
+      else if (seg.plane === 'YZ') allPoints.push({ x: c.x, y: c.y + r * cos, z: c.z + r * sin })
+      else allPoints.push({ x: c.x + r * cos, y: c.y, z: c.z + r * sin })
+    }
+  })
+  allPoints.forEach(p => {
+    const sphere = new THREE.Mesh(new THREE.SphereGeometry(0.8, 8, 8), pointMat)
+    sphere.position.set(p.x, p.y, p.z)
+    sketch3DPreviewGroup.add(sphere)
+  })
+
+  // 橡皮筋线（从最后一个点到鼠标位置）
+  if (mousePoint && sketch3DLastPoint) {
+    const geo = new THREE.BufferGeometry().setFromPoints([
+      new THREE.Vector3(sketch3DLastPoint.x, sketch3DLastPoint.y, sketch3DLastPoint.z),
+      mousePoint
+    ])
+    const line = new THREE.Line(geo, dashMat)
+    line.computeLineDistances()
+    sketch3DPreviewGroup.add(line)
+  }
+}
+
+const sketch3DUpdatePipePreview = () => {
+  if (sketch3DSegments.length === 0 || !sketch3DPipeParams) return
+  clearPipePreview()
+  isAssemblyMode = false
+  const params = {
+    ...sketch3DPipeParams,
+    pathData3d: { segments: sketch3DSegments },
+    type: 'sketch3d'
+  }
+  const result = createSketch3DPipe(params)
+  if (!result) return
+  enableShadowsForObject(result.pipeGroup)
+  previewPipe = result.pipeGroup
+  scene.add(previewPipe)
+}
+
+const sketch3DAddLineSegment = (point) => {
+  if (!sketch3DLastPoint) {
+    sketch3DLastPoint = { x: point.x, y: point.y, z: point.z }
+    return
+  }
+  const seg = {
+    type: 'line',
+    start: { ...sketch3DLastPoint },
+    end: { x: point.x, y: point.y, z: point.z }
+  }
+  sketch3DSegments.push(seg)
+  sketch3DLastPoint = { ...seg.end }
+  sketch3DUpdatePipePreview()
+  sketch3DSyncPathData()
+}
+
+const sketch3DAddArcSegment = (point) => {
+  if (sketch3DArcState === 'start') {
+    if (!sketch3DLastPoint) {
+      sketch3DLastPoint = { x: point.x, y: point.y, z: point.z }
+      return
+    }
+    sketch3DArcStartPoint = { ...sketch3DLastPoint }
+    sketch3DArcEndPoint = { x: point.x, y: point.y, z: point.z }
+    sketch3DArcState = 'center'
+  } else if (sketch3DArcState === 'center') {
+    // point 是圆弧经过的中间点，用三点定弧
+    const p1 = sketch3DArcStartPoint
+    const p2 = { x: point.x, y: point.y, z: point.z }
+    const p3 = sketch3DArcEndPoint
+    const plane = sketch3DWorkingPlane.value
+
+    // 在工作平面上提取2D坐标
+    const to2D = (pt) => {
+      if (plane === 'XY') return { u: pt.x, v: pt.y }
+      if (plane === 'YZ') return { u: pt.y, v: pt.z }
+      return { u: pt.x, v: pt.z } // XZ
+    }
+    const a = to2D(p1), b = to2D(p2), c = to2D(p3)
+
+    // 三点求圆心
+    const D = 2 * (a.u * (b.v - c.v) + b.u * (c.v - a.v) + c.u * (a.v - b.v))
+    if (Math.abs(D) < 1e-10) {
+      // 三点共线，退化为直线
+      sketch3DSegments.push({ type: 'line', start: { ...p1 }, end: { ...p3 } })
+      sketch3DLastPoint = { ...p3 }
+    } else {
+      const ux = ((a.u * a.u + a.v * a.v) * (b.v - c.v) + (b.u * b.u + b.v * b.v) * (c.v - a.v) + (c.u * c.u + c.v * c.v) * (a.v - b.v)) / D
+      const uy = ((a.u * a.u + a.v * a.v) * (c.u - b.u) + (b.u * b.u + b.v * b.v) * (a.u - c.u) + (c.u * c.u + c.v * c.v) * (b.u - a.u)) / D
+      const radius = Math.sqrt((a.u - ux) * (a.u - ux) + (a.v - uy) * (a.v - uy))
+
+      // 转回3D圆心
+      let center
+      if (plane === 'XY') center = { x: ux, y: uy, z: p1.z }
+      else if (plane === 'YZ') center = { x: p1.x, y: ux, z: uy }
+      else center = { x: ux, y: p1.y, z: uy }
+
+      const startAngle = Math.atan2(a.v - uy, a.u - ux)
+      const midAngle = Math.atan2(b.v - uy, b.u - ux)
+      let endAngle = Math.atan2(c.v - uy, c.u - ux)
+
+      // 确定方向：中间点应在起点到终点的弧上
+      const normalizeAngle = (a) => ((a % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI)
+      const sa = normalizeAngle(startAngle)
+      const ma = normalizeAngle(midAngle)
+      let ea = normalizeAngle(endAngle)
+
+      // 检查逆时针方向是否经过中间点
+      const ccwContains = (s, m, e) => {
+        if (s <= e) return s <= m && m <= e
+        return m >= s || m <= e
+      }
+      if (!ccwContains(sa, ma, ea)) {
+        // 需要走另一个方向
+        endAngle = startAngle + (normalizeAngle(endAngle - startAngle) - 2 * Math.PI)
+      } else {
+        endAngle = startAngle + normalizeAngle(endAngle - startAngle)
+      }
+
+      sketch3DSegments.push({
+        type: 'arc', center, radius, startAngle, endAngle, plane, clockwise: endAngle < startAngle
+      })
+      sketch3DLastPoint = { ...p3 }
+    }
+
+    sketch3DArcState = 'start'
+    sketch3DArcStartPoint = null
+    sketch3DArcEndPoint = null
+    sketch3DUpdatePipePreview()
+    sketch3DSyncPathData()
+  }
+}
+
+const sketch3DSyncPathData = () => {
+  window.dispatchEvent(new CustomEvent('sketch3d-pathdata-sync', {
+    detail: { segments: sketch3DSegments.map(s => ({ ...s })) }
+  }))
+}
+
+const sketch3DUndo = () => {
+  if (sketch3DSegments.length > 0) {
+    sketch3DSegments.pop()
+    if (sketch3DSegments.length > 0) {
+      const last = sketch3DSegments[sketch3DSegments.length - 1]
+      if (last.type === 'line') sketch3DLastPoint = { ...last.end }
+      else {
+        const a = last.endAngle, c = last.center, r = last.radius
+        const cos = Math.cos(a), sin = Math.sin(a)
+        if (last.plane === 'XY') sketch3DLastPoint = { x: c.x + r * cos, y: c.y + r * sin, z: c.z }
+        else if (last.plane === 'YZ') sketch3DLastPoint = { x: c.x, y: c.y + r * cos, z: c.z + r * sin }
+        else sketch3DLastPoint = { x: c.x + r * cos, y: c.y, z: c.z + r * sin }
+      }
+    } else {
+      sketch3DLastPoint = null
+    }
+    sketch3DUpdatePipePreview()
+    sketch3DUpdatePreviewLines(null)
+    sketch3DSyncPathData()
+  }
+}
+
+const sketch3DConfirm = () => {
+  if (sketch3DSegments.length > 0) {
+    sketch3DSyncPathData()
+  }
+  exitSketch3DMode()
+}
+
+const sketch3DClear = () => {
+  sketch3DSegments = []
+  sketch3DLastPoint = null
+  sketch3DArcState = 'start'
+  sketch3DArcStartPoint = null
+  sketch3DArcEndPoint = null
+  clearPipePreview()
+  sketch3DUpdatePreviewLines(null)
+  sketch3DSyncPathData()
+}
+
+const enterSketch3DMode = (params) => {
+  isSketch3DMode.value = true
+  sketch3DPipeParams = { innerDiameter: params.innerDiameter, outerDiameter: params.outerDiameter, segments: params.segments }
+  sketch3DSegments = []
+  sketch3DLastPoint = null
+  sketch3DArcState = 'start'
+
+  // 如果有已有路径数据（编辑模式）
+  if (params.pathData3d && params.pathData3d.segments && params.pathData3d.segments.length > 0) {
+    sketch3DSegments = params.pathData3d.segments.map(s => ({ ...s }))
+    const last = sketch3DSegments[sketch3DSegments.length - 1]
+    if (last.type === 'line') sketch3DLastPoint = { ...last.end }
+    else {
+      const a = last.endAngle, c = last.center, r = last.radius
+      const cos = Math.cos(a), sin = Math.sin(a)
+      if (last.plane === 'XY') sketch3DLastPoint = { x: c.x + r * cos, y: c.y + r * sin, z: c.z }
+      else if (last.plane === 'YZ') sketch3DLastPoint = { x: c.x, y: c.y + r * cos, z: c.z + r * sin }
+      else sketch3DLastPoint = { x: c.x + r * cos, y: c.y, z: c.z + r * sin }
+    }
+    sketch3DUpdatePipePreview()
+  }
+
+  // 禁用左键旋转
+  if (controls) controls.mouseButtons.LEFT = null
+  sketch3DUpdateGrid()
+  sketch3DUpdatePreviewLines(null)
+}
+
+const exitSketch3DMode = () => {
+  isSketch3DMode.value = false
+  sketch3DPipeParams = null
+  sketch3DSegments = []
+  sketch3DLastPoint = null
+  sketch3DArcState = 'start'
+  sketch3DArcStartPoint = null
+  sketch3DArcEndPoint = null
+
+  if (controls) controls.mouseButtons.LEFT = THREE.MOUSE.ROTATE
+  if (sketch3DGridHelper) {
+    scene.remove(sketch3DGridHelper)
+    sketch3DGridHelper = null
+  }
+  if (sketch3DPreviewGroup) {
+    sketch3DPreviewGroup.traverse(c => { c.geometry?.dispose(); c.material?.dispose() })
+    scene.remove(sketch3DPreviewGroup)
+    sketch3DPreviewGroup = null
+  }
+}
+
+const handleSketch3DParamsUpdate = (event) => {
+  const params = event.detail
+  if (params.type === 'sketch3d') {
+    // 关闭2D分屏
+    if (isSplitView.value) {
+      isSplitView.value = false
+      sketchPathData.value = null
+      sketch2DPipeParams.value = null
+      initialSketchPathData.value = null
+    }
+    enterSketch3DMode(params)
+  } else {
+    if (isSketch3DMode.value) exitSketch3DMode()
+  }
+}
+
+const handleSketch3DKeyDown = (event) => {
+  if (!isSketch3DMode.value) return
+  if (event.key === 'Tab') {
+    event.preventDefault()
+    const planes = ['XZ', 'XY', 'YZ']
+    const idx = planes.indexOf(sketch3DWorkingPlane.value)
+    sketch3DWorkingPlane.value = planes[(idx + 1) % 3]
+    sketch3DUpdateGrid()
+  } else if (event.key === 'z' && (event.ctrlKey || event.metaKey)) {
+    event.preventDefault()
+    sketch3DUndo()
+  } else if (event.key === 'Enter') {
+    event.preventDefault()
+    sketch3DConfirm()
+  } else if (event.key === 'Escape') {
+    event.preventDefault()
+    clearPipePreview()
+    exitSketch3DMode()
+    window.dispatchEvent(new CustomEvent('clear-pipe-preview'))
+  }
+}
+
+// === 渐进细分 LOD ===
+let _refineRAF = null
+let _fpsFrames = 0, _fpsLastTime = performance.now(), _fpsValue = 60
+let _lodAutoMode = true
+
+const getNextLodSegments = (current, target) => {
+  return Math.min(current + 1, target)
+}
+
+const getPrevLodSegments = (current) => {
+  return Math.max(current - 1, 3)
+}
+
+const refinePipeObject = (pipeGroup) => {
+  const ud = pipeGroup.userData
+  if (!ud._originalParams || ud._lodSegments >= ud._targetSegments) return false
+  const nextSeg = getNextLodSegments(ud._lodSegments, ud._targetSegments)
+  const params = { ...ud._originalParams, segments: nextSeg }
+  const newGroup = createPipeObject(params, ud.assemblyItemId)
+  if (!newGroup) return false
+  const pos = pipeGroup.position.clone()
+  const rot = pipeGroup.rotation.clone()
+  while (pipeGroup.children.length) {
+    pipeGroup.remove(pipeGroup.children[0])
+  }
+  // 移入新子对象
+  while (newGroup.children.length) {
+    pipeGroup.add(newGroup.children[0])
+  }
+  pipeGroup.position.copy(pos)
+  pipeGroup.rotation.copy(rot)
+  ud._lodSegments = nextSeg
+  return true
+}
+
+const degradeLod = () => {
+  if (!previewPipe) return
+  // 找当前细分最高的管道降级
+  let target = null, maxSeg = 3
+  for (const child of previewPipe.children) {
+    const ud = child.userData
+    if (ud._originalParams && ud._lodSegments > 3 && ud._lodSegments > maxSeg) {
+      maxSeg = ud._lodSegments
+      target = child
+    }
+  }
+  if (!target) return
+  const ud = target.userData
+  const prevSeg = getPrevLodSegments(ud._lodSegments)
+  const params = { ...ud._originalParams, segments: prevSeg }
+  const newGroup = createPipeObject(params, ud.assemblyItemId)
+  if (!newGroup) return
+  const pos = target.position.clone()
+  const rot = target.rotation.clone()
+  while (target.children.length) {
+    target.remove(target.children[0])
+  }
+  while (newGroup.children.length) {
+    target.add(newGroup.children[0])
+  }
+  target.position.copy(pos)
+  target.rotation.copy(rot)
+  ud._lodSegments = prevSeg
+}
+
+const _frustum = new THREE.Frustum()
+const _projScreenMatrix = new THREE.Matrix4()
+
+const scheduleProgressiveRefine = () => {
+  if (_refineRAF) cancelAnimationFrame(_refineRAF)
+  if (!_lodAutoMode) return
+  const step = () => {
+    if (!previewPipe || !camera || !_lodAutoMode) return
+    _projScreenMatrix.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse)
+    _frustum.setFromProjectionMatrix(_projScreenMatrix)
+    // 收集需要升级的管道，可见的优先
+    let target = null
+    let fallback = null
+    for (const child of previewPipe.children) {
+      const ud = child.userData
+      if (!ud._originalParams || ud._lodSegments >= ud._targetSegments) continue
+      if (child.geometry?.boundingSphere !== undefined && _frustum.intersectsObject(child)) { target = child; break }
+      if (!fallback) fallback = child
+    }
+    const toRefine = target || fallback
+    if (toRefine) {
+      refinePipeObject(toRefine)
+      _refineRAF = requestAnimationFrame(step)
+    } else {
+      _refineRAF = null
+    }
+  }
+  _refineRAF = requestAnimationFrame(step)
+}
+
 // 浏览总装配体
 const updateAssemblyView = (items, preserveCamera = false) => {
   if (!scene) return
@@ -1625,14 +2453,23 @@ const updateAssemblyView = (items, preserveCamera = false) => {
         // 如果对象不存在，需要创建新的
         // 确保type参数被正确传入params
         const paramsWithType = { ...item.params, type: item.type }
-        
+
         // 对于2D草图建管，确保pathData被正确传递
         if (item.type === 'sketch2d' && item.params && item.params.pathData) {
           paramsWithType.pathData = item.params.pathData
         }
-        
-        const newPipeObj = createPipeObject(paramsWithType, item.id)
+        if (item.type === 'sketch3d' && item.params && item.params.pathData3d) {
+          paramsWithType.pathData3d = item.params.pathData3d
+        }
+
+        // LOD: 低精度优先
+        const targetSeg = Math.min(paramsWithType.segments || 8, 8)
+        const lodParams = { ...paramsWithType, segments: 3 }
+        const newPipeObj = createPipeObject(lodParams, item.id)
         if (newPipeObj) {
+          newPipeObj.userData._lodSegments = 3
+          newPipeObj.userData._targetSegments = targetSeg
+          newPipeObj.userData._originalParams = paramsWithType
           // 为管道启用阴影
           enableShadowsForObject(newPipeObj)
           if (item.position) {
@@ -1666,7 +2503,8 @@ const updateAssemblyView = (items, preserveCamera = false) => {
     // 更新 previewPipe 的矩阵
     previewPipe.updateMatrix()
     previewPipe.updateMatrixWorld(true)
-    
+
+    scheduleProgressiveRefine()
     return
   }
   
@@ -1686,14 +2524,23 @@ const updateAssemblyView = (items, preserveCamera = false) => {
     // 复用 createPipeObject 创建每个零件，传入装配体实例ID
     // 确保type参数被正确传入params
     const paramsWithType = { ...item.params, type: item.type }
-    
+
     // 对于2D草图建管，确保pathData被正确传递
     if (item.type === 'sketch2d' && item.params && item.params.pathData) {
       paramsWithType.pathData = item.params.pathData
     }
-    
-    const pipeObj = createPipeObject(paramsWithType, item.id)
+    if (item.type === 'sketch3d' && item.params && item.params.pathData3d) {
+      paramsWithType.pathData3d = item.params.pathData3d
+    }
+
+    // LOD: 低精度优先
+    const targetSeg = paramsWithType.segments || 12
+    const lodParams = { ...paramsWithType, segments: 3 }
+    const pipeObj = createPipeObject(lodParams, item.id)
     if (pipeObj) {
+      pipeObj.userData._lodSegments = 3
+      pipeObj.userData._targetSegments = targetSeg
+      pipeObj.userData._originalParams = paramsWithType
       // 为管道启用阴影
       enableShadowsForObject(pipeObj)
       // 应用位置和旋转信息
@@ -1729,12 +2576,16 @@ const updateAssemblyView = (items, preserveCamera = false) => {
     controls.target.set(0, 0, 0)
     controls.update()
   }
+
+  scheduleProgressiveRefine()
 }
 
 // 监听查看装配体事件
 const handleViewAssembly = (event) => {
   const items = event.detail
   const preserveCamera = event.preserveCamera || false
+  // 退出3D草图模式
+  if (isSketch3DMode.value) exitSketch3DMode()
   // 浏览装配体时，如果2D画板是打开的，应该关闭它
   if (isSplitView.value) {
     isSplitView.value = false
@@ -1798,6 +2649,37 @@ const handleRotationAxisChange = (event) => {
 }
 
 // 监听阵列模式切换
+const handleMoveModeToggle = (event) => {
+  isMoveMode = event.detail.enabled
+}
+
+const handleLodModeChange = (event) => {
+  const { auto, segments } = event.detail
+  _lodAutoMode = auto
+  if (auto) {
+    scheduleProgressiveRefine()
+  } else if (previewPipe) {
+    // 手动模式：所有管道设为指定细分数
+    if (_refineRAF) { cancelAnimationFrame(_refineRAF); _refineRAF = null }
+    for (const child of previewPipe.children) {
+      const ud = child.userData
+      if (!ud._originalParams) continue
+      if (ud._lodSegments === segments) continue
+      const params = { ...ud._originalParams, segments }
+      const newGroup = createPipeObject(params, ud.assemblyItemId)
+      if (!newGroup) continue
+      const pos = child.position.clone()
+      const rot = child.rotation.clone()
+      while (child.children.length) { const c = child.children[0]; if (c.geometry) c.geometry.dispose(); child.remove(c) }
+      while (newGroup.children.length) { child.add(newGroup.children[0]) }
+      child.position.copy(pos)
+      child.rotation.copy(rot)
+      ud._lodSegments = segments
+      ud._targetSegments = segments
+    }
+  }
+}
+
 const handleArrayModeToggle = (event) => {
   isArrayMode = event.detail.enabled
   if (!isArrayMode) {
@@ -2403,11 +3285,12 @@ const handleExportAssembly = (event) => {
   }
 }
 
-onMounted(() => {
-  initThree()
+onMounted(async () => {
+  await initThree()
   window.addEventListener('resize', handleResize)
   window.addEventListener('reset-camera', handleResetCamera)
   window.addEventListener('switch-camera', switchCamera)
+  window.addEventListener('switch-renderer', switchRenderer)
   window.addEventListener('update-pipe-preview', handlePipeParamsUpdate)
   window.addEventListener('view-part', handleViewPart)
   window.addEventListener('clear-pipe-preview', handleClearPreview)
@@ -2424,7 +3307,11 @@ onMounted(() => {
   window.addEventListener('reset-join-selection', handleResetJoinSelection)
   window.addEventListener('sketch2d-params-update', handleSketch2DParamsUpdate)
   window.addEventListener('sketch2d-path-updated', handleSketch2DPathUpdated)
+  window.addEventListener('sketch3d-params-update', handleSketch3DParamsUpdate)
+  window.addEventListener('keydown', handleSketch3DKeyDown)
   window.addEventListener('move-plane-change', handleMovePlaneChange)
+  window.addEventListener('move-mode-toggle', handleMoveModeToggle)
+  window.addEventListener('lod-mode-change', handleLodModeChange)
   window.addEventListener('array-mode-toggle', handleArrayModeToggle)
   window.addEventListener('assembly-selection-changed', handleAssemblySelectionChanged)
   window.addEventListener('menu-width-changed', handleMenuWidthChanged)
@@ -2470,6 +3357,7 @@ onUnmounted(() => {
   window.removeEventListener('resize', handleResize)
   window.removeEventListener('reset-camera', handleResetCamera)
   window.removeEventListener('switch-camera', switchCamera)
+  window.removeEventListener('switch-renderer', switchRenderer)
   window.removeEventListener('update-pipe-preview', handlePipeParamsUpdate)
   window.removeEventListener('view-part', handleViewPart)
   window.removeEventListener('clear-pipe-preview', handleClearPreview)
@@ -2486,7 +3374,11 @@ onUnmounted(() => {
   window.removeEventListener('reset-join-selection', handleResetJoinSelection)
   window.removeEventListener('sketch2d-params-update', handleSketch2DParamsUpdate)
   window.removeEventListener('sketch2d-path-updated', handleSketch2DPathUpdated)
+  window.removeEventListener('sketch3d-params-update', handleSketch3DParamsUpdate)
+  window.removeEventListener('keydown', handleSketch3DKeyDown)
   window.removeEventListener('move-plane-change', handleMovePlaneChange)
+  window.removeEventListener('move-mode-toggle', handleMoveModeToggle)
+  window.removeEventListener('lod-mode-change', handleLodModeChange)
   window.removeEventListener('array-mode-toggle', handleArrayModeToggle)
   window.removeEventListener('assembly-selection-changed', handleAssemblySelectionChanged)
   window.removeEventListener('menu-width-changed', handleMenuWidthChanged)
@@ -2495,9 +3387,27 @@ onUnmounted(() => {
   
   // 清理预览对象
   clearPipePreview()
-  
-  if (animationId) {
-    cancelAnimationFrame(animationId)
+
+  // 清理stats
+  const sp = document.getElementById('stats-panel')
+  if (sp) sp.remove()
+  const sb = document.getElementById('stats-ball')
+  if (sb) sb.remove()
+
+  // 清理3D草图
+  if (isSketch3DMode.value) exitSketch3DMode()
+
+  // 清理动态网格
+  flushPendingGridDisposals()
+  if (gridGroup && scene) {
+    scene.remove(gridGroup)
+    disposeGridGroupImmediate(gridGroup)
+    gridGroup = null
+  }
+
+  if (renderer) {
+    renderer.setAnimationLoop(null)
+    if (renderer._animation) renderer._animation.stop()
   }
   
   if (controls) {
@@ -2557,6 +3467,110 @@ onUnmounted(() => {
   flex: 1 1 0;
   width: auto;
 }
+
+.scale-bar {
+  position: absolute;
+  bottom: 24px;
+  left: 24px;
+  pointer-events: none;
+  z-index: 10;
+}
+
+.scale-bar-ruler {
+  position: relative;
+  height: 24px;
+  min-width: 40px;
+  transition: width 0.15s ease;
+}
+
+.scale-bar-track {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: rgba(255, 255, 255, 0.8);
+}
+
+.scale-bar-tick {
+  position: absolute;
+  bottom: 0;
+  transform: translateX(-50%);
+}
+
+.scale-bar-tick-line {
+  width: 2px;
+  height: 8px;
+  background: rgba(255, 255, 255, 0.8);
+  margin: 0 auto;
+}
+
+.scale-bar-tick-label {
+  display: block;
+  color: rgba(255, 255, 255, 0.85);
+  font-size: 11px;
+  font-family: monospace;
+  white-space: nowrap;
+  text-align: center;
+  margin-bottom: 2px;
+}
+
+.sketch3d-toolbar {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 12px;
+  background: rgba(0, 0, 0, 0.8);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 8px;
+  padding: 8px 14px;
+  z-index: 20;
+}
+
+.sketch3d-toolbar-group {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.sketch3d-label {
+  color: rgba(255, 255, 255, 0.5);
+  font-size: 11px;
+  margin-right: 4px;
+}
+
+.sketch3d-btn {
+  background: rgba(255, 255, 255, 0.1);
+  color: #ccc;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 4px;
+  padding: 4px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.sketch3d-btn:hover {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+.sketch3d-btn.active {
+  background: #4a9eff;
+  color: #fff;
+  border-color: #4a9eff;
+}
+
+.sketch3d-btn-confirm {
+  background: rgba(40, 167, 69, 0.7);
+  border-color: rgba(40, 167, 69, 0.8);
+  color: #fff;
+}
+
+.sketch3d-btn-confirm:hover {
+  background: rgba(40, 167, 69, 0.9);
+}
+
 </style>
 
 

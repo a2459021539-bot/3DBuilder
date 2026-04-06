@@ -27,6 +27,7 @@ export const icons = {
 
   // 工具栏图标
   toolbar: {
+    view: '👁️',         // 浏览模式
     move: '✋',         // 移动模式
     rotate: '🔄',      // 旋转模式
     join: '🔗',        // 拼接模式

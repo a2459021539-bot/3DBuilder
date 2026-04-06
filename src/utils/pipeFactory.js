@@ -4,6 +4,7 @@ import { createStraightPipe } from './straightPipe.js'
 import { createBendPipe } from './bendPipe.js'
 import { createReducerPipe } from './reducerPipe.js'
 import { createSketch2DPipe } from './sketch2dPipe.js'
+import { createSketch3DPipe } from './sketch3dPipe.js'
 
 // 主函数：创建管道对象
 export function createPipeObject(params, assemblyItemId = null) {
@@ -23,6 +24,9 @@ export function createPipeObject(params, assemblyItemId = null) {
   } else if (type === 'sketch2d') {
     // === 2D草图建管逻辑 ===
     result = createSketch2DPipe(params, assemblyItemId)
+  } else if (type === 'sketch3d') {
+    // === 3D草图建管逻辑 ===
+    result = createSketch3DPipe(params, assemblyItemId)
   } else {
     // === 直管逻辑 ===
     // 验证参数（仅对直管进行此验证）

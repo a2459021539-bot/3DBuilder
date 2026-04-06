@@ -238,103 +238,81 @@ const worldToCanvas = (worldX, worldY) => {
 // 绘制网格
 const drawGrid = () => {
   if (!ctx || !canvas) return
-  
-  // 使用CSS尺寸而不是实际像素尺寸（因为已经scale了）
+
   const rect = canvas.getBoundingClientRect()
   const width = rect.width
   const height = rect.height
-  
+
   // 计算可见范围（mm）
-  // X轴：canvasX = worldX * scale + offsetX
   const minX = -offsetX.value / scale.value
   const maxX = (width - offsetX.value) / scale.value
-  
-  // Y轴翻转：canvasY = -worldY * scale + offsetY
-  // 所以 worldY = -(canvasY - offsetY) / scale
-  // 顶部（canvasY=0）对应 worldY = offsetY / scale（最大值）
-  // 底部（canvasY=height）对应 worldY = -(height - offsetY) / scale（最小值）
-  const maxY = offsetY.value / scale.value  // 顶部
-  const minY = -(height - offsetY.value) / scale.value  // 底部
-  
+  const maxY = offsetY.value / scale.value
+  const minY = -(height - offsetY.value) / scale.value
+
+  // 根据缩放级别自适应网格步长
+  // 目标：细网格线间距约 15-40px
+  const pixelsPerMm = scale.value
+  const rough = 20 / pixelsPerMm // 约20px对应的mm数
+  const pow = Math.pow(10, Math.floor(Math.log10(rough)))
+  const frac = rough / pow
+  const fineStep = frac <= 1 ? pow : frac <= 2 ? 2 * pow : frac <= 5 ? 5 * pow : 10 * pow
+  const coarseStep = fineStep * 5
+
+  const formatLabel = (mm) => {
+    if (Math.abs(mm) >= 1000) return `${(mm / 1000).toFixed(mm % 1000 === 0 ? 0 : 1)}m`
+    return `${mm}mm`
+  }
+
+  // 细网格
   ctx.strokeStyle = '#333333'
   ctx.lineWidth = 0.5
-  
-  // 1mm细网格
-  ctx.strokeStyle = '#444444'
-  ctx.lineWidth = 0.5
-  for (let x = Math.floor(minX); x <= Math.ceil(maxX); x++) {
+  for (let x = Math.floor(minX / fineStep) * fineStep; x <= Math.ceil(maxX / fineStep) * fineStep; x += fineStep) {
     const canvasX = worldToCanvas(x, 0).x
     ctx.beginPath()
     ctx.moveTo(canvasX, 0)
     ctx.lineTo(canvasX, height)
     ctx.stroke()
   }
-  for (let y = Math.floor(minY); y <= Math.ceil(maxY); y++) {
+  for (let y = Math.floor(minY / fineStep) * fineStep; y <= Math.ceil(maxY / fineStep) * fineStep; y += fineStep) {
     const canvasY = worldToCanvas(0, y).y
     ctx.beginPath()
     ctx.moveTo(0, canvasY)
     ctx.lineTo(width, canvasY)
     ctx.stroke()
   }
-  
-  // 5mm中等网格
+
+  // 粗网格 + 标注
   ctx.strokeStyle = '#666666'
-  ctx.lineWidth = 1
-  for (let x = Math.floor(minX / 5) * 5; x <= Math.ceil(maxX / 5) * 5; x += 5) {
-    if (x % 10 !== 0) {
-      const canvasX = worldToCanvas(x, 0).x
-      ctx.beginPath()
-      ctx.moveTo(canvasX, 0)
-      ctx.lineTo(canvasX, height)
-      ctx.stroke()
-    }
-  }
-  for (let y = Math.floor(minY / 5) * 5; y <= Math.ceil(maxY / 5); y += 5) {
-    if (y % 10 !== 0) {
-      const canvasY = worldToCanvas(0, y).y
-      ctx.beginPath()
-      ctx.moveTo(0, canvasY)
-      ctx.lineTo(width, canvasY)
-      ctx.stroke()
-    }
-  }
-  
-  // 10mm粗网格和标注
-  ctx.strokeStyle = '#888888'
   ctx.lineWidth = 1.5
   ctx.font = '10px Arial'
   ctx.fillStyle = '#aaaaaa'
   ctx.textAlign = 'center'
   ctx.textBaseline = 'middle'
-  
-  for (let x = Math.floor(minX / 10) * 10; x <= Math.ceil(maxX / 10) * 10; x += 10) {
+
+  for (let x = Math.floor(minX / coarseStep) * coarseStep; x <= Math.ceil(maxX / coarseStep) * coarseStep; x += coarseStep) {
     const canvasX = worldToCanvas(x, 0).x
     ctx.beginPath()
     ctx.moveTo(canvasX, 0)
     ctx.lineTo(canvasX, height)
     ctx.stroke()
-    
-    // 标注
     if (x !== 0) {
       const labelY = worldToCanvas(0, 0).y - 15
-      ctx.fillText(`${x}mm`, canvasX, labelY)
+      ctx.fillText(formatLabel(x), canvasX, labelY)
     }
   }
-  
-  for (let y = Math.floor(minY / 10) * 10; y <= Math.ceil(maxY / 10) * 10; y += 10) {
+
+  for (let y = Math.floor(minY / coarseStep) * coarseStep; y <= Math.ceil(maxY / coarseStep) * coarseStep; y += coarseStep) {
     const canvasY = worldToCanvas(0, y).y
     ctx.beginPath()
     ctx.moveTo(0, canvasY)
     ctx.lineTo(width, canvasY)
     ctx.stroke()
-    
-    // 标注
     if (y !== 0) {
       const labelX = worldToCanvas(0, 0).x - 30
-      ctx.fillText(`${y}mm`, labelX, canvasY)
+      ctx.fillText(formatLabel(y), labelX, canvasY)
     }
   }
-  
+
   // 绘制坐标轴
   ctx.strokeStyle = '#ff0000'
   ctx.lineWidth = 2
@@ -343,7 +321,7 @@ const drawGrid = () => {
   ctx.moveTo(origin.x, 0)
   ctx.lineTo(origin.x, height)
   ctx.stroke()
-  
+
   ctx.strokeStyle = '#00ff00'
   ctx.beginPath()
   ctx.moveTo(0, origin.y)

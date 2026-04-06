@@ -111,17 +111,19 @@ export function useTransformLogic(assemblyItems, historyItems) {
     }))
   }
 
-  const executeArray = (selectedIds) => {
+  const executeArray = (selectedIds, onProgress) => {
     if (!assemblyItems || !selectedIds || selectedIds.length === 0) return
-    
+
     const sourceItems = assemblyItems.value.filter(item => selectedIds.includes(item.id))
-    
+
     // 创建一个文件夹组，包含所有阵列产生的新管道
     const timestamp = Date.now()
     const groupId = `array_group_${timestamp}_${Math.floor(Math.random() * 10000)}`
     const groupChildren = []
     const sourceItemNames = sourceItems.map(item => item.name).join('、')
-    
+    const total = sourceItems.length * arrayCount.value
+    let done = 0
+
     // 为每个源项创建阵列副本
     sourceItems.forEach((source, sourceIdx) => {
       for (let i = 1; i <= arrayCount.value; i++) {
@@ -132,20 +134,17 @@ export function useTransformLogic(assemblyItems, historyItems) {
         if (newItem.type === 'array-group') {
           delete newItem.type
         }
-        
-        // 如果有多个源项，在名称中标识来源
-        if (sourceItems.length > 1) {
-          newItem.name = `${source.name} (副本${i})`
-        } else {
-          newItem.name = `${source.name} (副本${i})`
-        }
-        
+
+        newItem.name = `${source.name} (副本${i})`
+
         // Calculate offset
         const offset = i * arraySpacing.value * arraySign.value
         newItem.position[arrayDirection.value] += offset
-        
+
         newItem.assemblyTime = new Date().toLocaleString()
         groupChildren.push(newItem)
+        done++
+        if (onProgress) onProgress(Math.round(done / total * 80))
       }
     })
     
@@ -156,7 +155,7 @@ export function useTransformLogic(assemblyItems, historyItems) {
       type: 'array-group',
       name: `阵列【生成${totalCount}个】`,
       children: groupChildren,
-      expanded: true, // 默认展开
+      expanded: false, // 默认折叠
       arrayConfig: {
         direction: arrayDirection.value,
         sign: arraySign.value,
@@ -179,6 +178,7 @@ export function useTransformLogic(assemblyItems, historyItems) {
     groupChildren.forEach(child => {
       assemblyItems.value.push(child)
     })
+    if (onProgress) onProgress(90)
     
     // Record history
     const historyItem = {

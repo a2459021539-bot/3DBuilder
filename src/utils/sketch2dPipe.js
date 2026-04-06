@@ -1,8 +1,11 @@
 import * as THREE from 'three'
-import { 
-  createPipeMaterial, 
+import {
+  createPipeMaterial,
   createEndCapMaterial,
-  setupEndFaceUserData 
+  createPipeSection,
+  setupEndFaceUserData,
+  createEndCapForExtrudeFrame,
+  createHitboxForExtrudeFrame
 } from './pipeCommon.js'
 
 // 2D路径曲线类（组合直线和圆弧）
@@ -153,13 +156,7 @@ export function createSketch2DPipe(params, assemblyItemId = null) {
   // 创建路径曲线
   const pathCurve = new Path2DCurve(pathData.segments)
   
-  // 创建圆形截面（圆环）
-  const shape = new THREE.Shape()
-  shape.absarc(0, 0, outerRadius, 0, Math.PI * 2, false)
-  
-  const holePath = new THREE.Path()
-  holePath.absarc(0, 0, innerRadius, 0, Math.PI * 2, true)
-  shape.holes.push(holePath)
+  const shape = createPipeSection(outerRadius, innerRadius, radialSegments)
   
   // 计算路径总长度以确定步数
   let totalLength = 0
@@ -173,8 +170,12 @@ export function createSketch2DPipe(params, assemblyItemId = null) {
     }
   })
   
-  // 根据长度计算步数（每mm至少1步）
-  const steps = Math.max(Math.ceil(totalLength), 20)
+  // 每个路径段分配 radialSegments 步，弧线段 segments=3 时只有3段
+  const steps = pathData.segments.length * radialSegments
+
+  // 与 ExtrudeGeometry 内部一致：等弧长采样点 + Frenet 标架（截面在 N×B 平面，x→N、y→B）
+  const spacedPoints = pathCurve.getSpacedPoints(steps)
+  const frenetFrames = pathCurve.computeFrenetFrames(steps, false)
   
   // 创建拉伸设置
   const extrudeSettings = {
@@ -209,22 +210,23 @@ export function createSketch2DPipe(params, assemblyItemId = null) {
   // 创建端面
   const endCapMaterial = createEndCapMaterial()
   
-  // 起始端面
-  const startPoint = new THREE.Vector3()
-  pathCurve.getPoint(0, startPoint)
-  const startTangent = new THREE.Vector3()
-  pathCurve.getTangent(0, startTangent)
-  const startNormal = startTangent.clone().multiplyScalar(-1) // 法向量指向外部
+  // 起始端面（与拉伸体首圈同一标架：P + x*N + y*B）
+  const startPoint = spacedPoints[0].clone()
+  const startN = frenetFrames.normals[0].clone()
+  const startB = frenetFrames.binormals[0].clone()
+  const startTangent = frenetFrames.tangents[0].clone()
+  const startNormal = startTangent.clone().multiplyScalar(-1) // 端面外法向（装配/拾取用）
   
-  // 创建起始端面几何体（在局部坐标系中）
-  const startCapGeometry = createEndCapForPath(innerRadius, outerRadius, startPoint, startNormal, radialSegments)
+  const startCapGeometry = createEndCapForExtrudeFrame(
+    innerRadius, outerRadius, startPoint, startN, startB, startNormal, radialSegments
+  )
   const startCap = new THREE.Mesh(startCapGeometry, endCapMaterial)
   
-  // 设置起始端面用户数据
   setupEndFaceUserData(startCap, 'front', startPoint.clone(), startNormal.clone(), assemblyItemId)
   
-  // 创建起始端面Hitbox
-  const startHitboxGeometry = createHitboxForPath(outerRadius * 1.1, startPoint, startNormal, radialSegments)
+  const startHitboxGeometry = createHitboxForExtrudeFrame(
+    outerRadius * 1.1, startPoint, startN, startB, startNormal, radialSegments
+  )
   const startHitboxMaterial = new THREE.MeshBasicMaterial({ 
     color: 0xff0000,
     transparent: true,
@@ -235,21 +237,22 @@ export function createSketch2DPipe(params, assemblyItemId = null) {
   setupEndFaceUserData(startHitbox, 'front', startPoint.clone(), startNormal.clone(), assemblyItemId)
   
   // 结束端面
-  const endPoint = new THREE.Vector3()
-  pathCurve.getPoint(1, endPoint)
-  const endTangent = new THREE.Vector3()
-  pathCurve.getTangent(1, endTangent)
-  const endNormal = endTangent.clone() // 法向量指向外部
+  const endPoint = spacedPoints[steps].clone()
+  const endN = frenetFrames.normals[steps].clone()
+  const endB = frenetFrames.binormals[steps].clone()
+  const endTangent = frenetFrames.tangents[steps].clone()
+  const endNormal = endTangent.clone()
   
-  // 创建结束端面几何体
-  const endCapGeometry = createEndCapForPath(innerRadius, outerRadius, endPoint, endNormal, radialSegments)
+  const endCapGeometry = createEndCapForExtrudeFrame(
+    innerRadius, outerRadius, endPoint, endN, endB, endNormal, radialSegments
+  )
   const endCap = new THREE.Mesh(endCapGeometry, endCapMaterial)
   
-  // 设置结束端面用户数据
   setupEndFaceUserData(endCap, 'back', endPoint.clone(), endNormal.clone(), assemblyItemId)
   
-  // 创建结束端面Hitbox
-  const endHitboxGeometry = createHitboxForPath(outerRadius * 1.1, endPoint, endNormal, radialSegments)
+  const endHitboxGeometry = createHitboxForExtrudeFrame(
+    outerRadius * 1.1, endPoint, endN, endB, endNormal, radialSegments
+  )
   const endHitbox = new THREE.Mesh(endHitboxGeometry, startHitboxMaterial)
   setupEndFaceUserData(endHitbox, 'back', endPoint.clone(), endNormal.clone(), assemblyItemId)
   
@@ -264,83 +267,4 @@ export function createSketch2DPipe(params, assemblyItemId = null) {
   const groupSize = Math.max(size.x, size.y, size.z)
   
   return { pipeGroup, groupSize }
-}
-
-// 为路径端面创建几何体
-function createEndCapForPath(innerRadius, outerRadius, position, normal, radialSegments) {
-  const geometry = new THREE.BufferGeometry()
-  const vertices = []
-  const normals = []
-  const indices = []
-  const uvs = []
-  
-  // 计算旋转矩阵（使法向量对齐到Y轴）
-  const up = new THREE.Vector3(0, 1, 0)
-  const quaternion = new THREE.Quaternion()
-  quaternion.setFromUnitVectors(up, normal.clone().normalize())
-  
-  for (let i = 0; i <= radialSegments; i++) {
-    const theta = (i / radialSegments) * Math.PI * 2
-    const sin = Math.sin(theta)
-    const cos = Math.cos(theta)
-    
-    // 外圆点
-    const outerPoint = new THREE.Vector3(outerRadius * sin, 0, outerRadius * cos)
-    outerPoint.applyQuaternion(quaternion)
-    outerPoint.add(position)
-    vertices.push(outerPoint.x, outerPoint.y, outerPoint.z)
-    normals.push(normal.x, normal.y, normal.z)
-    uvs.push(0.5 + 0.5 * sin, 0.5 + 0.5 * cos)
-    
-    // 内圆点
-    const innerPoint = new THREE.Vector3(innerRadius * sin, 0, innerRadius * cos)
-    innerPoint.applyQuaternion(quaternion)
-    innerPoint.add(position)
-    vertices.push(innerPoint.x, innerPoint.y, innerPoint.z)
-    normals.push(normal.x, normal.y, normal.z)
-    uvs.push(0.5 + 0.5 * (innerRadius/outerRadius) * sin, 0.5 + 0.5 * (innerRadius/outerRadius) * cos)
-  }
-  
-  // 生成索引
-  for (let i = 0; i < radialSegments; i++) {
-    const outerCurrent = i * 2
-    const innerCurrent = i * 2 + 1
-    const outerNext = (i + 1) * 2
-    const innerNext = (i + 1) * 2 + 1
-    
-    // 根据法向量方向决定顶点顺序
-    if (normal.y > 0) {
-      indices.push(outerCurrent, innerCurrent, outerNext)
-      indices.push(innerCurrent, innerNext, outerNext)
-    } else {
-      indices.push(outerNext, innerCurrent, outerCurrent)
-      indices.push(outerNext, innerNext, innerCurrent)
-    }
-  }
-  
-  geometry.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3))
-  geometry.setAttribute('normal', new THREE.Float32BufferAttribute(normals, 3))
-  geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2))
-  geometry.setIndex(indices)
-  
-  return geometry
-}
-
-// 为路径端面创建Hitbox几何体
-function createHitboxForPath(radius, position, normal, radialSegments) {
-  // 创建圆形几何体
-  const geometry = new THREE.CircleGeometry(radius, radialSegments)
-  
-  // 计算旋转矩阵
-  const up = new THREE.Vector3(0, 0, 1) // CircleGeometry默认在XOY平面
-  const quaternion = new THREE.Quaternion()
-  quaternion.setFromUnitVectors(up, normal.clone().normalize())
-  
-  // 应用旋转
-  geometry.applyQuaternion(quaternion)
-  
-  // 应用位置
-  geometry.translate(position.x, position.y, position.z)
-  
-  return geometry
 }

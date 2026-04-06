@@ -26,6 +26,10 @@ export function usePartManager(assemblyItems, historyItems, uiState) {
       window.dispatchEvent(new CustomEvent('sketch2d-params-update', {
         detail: { ...newParams, type: 'sketch2d', forceUpdate: true }
       }))
+    } else if (currentPartType.value === 'sketch3d') {
+      window.dispatchEvent(new CustomEvent('sketch3d-params-update', {
+        detail: { ...newParams, type: 'sketch3d', forceUpdate: true }
+      }))
     } else {
       window.dispatchEvent(new CustomEvent('update-pipe-preview', {
         detail: { ...newParams, type: currentPartType.value }
@@ -99,9 +103,22 @@ export function usePartManager(assemblyItems, historyItems, uiState) {
         segments: 8,
         pathData: { segments: [] }
       }
-      
+
       window.dispatchEvent(new CustomEvent('sketch2d-params-update', {
         detail: { ...pipeParams.value, type: 'sketch2d' }
+      }))
+    } else if (type === 'sketch3d') {
+      const baseName = partTypes.find(t => t.value === type)?.label || '零件'
+      pipeParams.value = {
+        name: getNextName(baseName),
+        innerDiameter: 10,
+        outerDiameter: 12,
+        segments: 8,
+        pathData3d: { segments: [] }
+      }
+
+      window.dispatchEvent(new CustomEvent('sketch3d-params-update', {
+        detail: { ...pipeParams.value, type: 'sketch3d' }
       }))
     } else {
       // 其他类型直接创建
@@ -126,7 +143,7 @@ export function usePartManager(assemblyItems, historyItems, uiState) {
   }
 
   const editPart = (part) => {
-    if (part && (part.type === 'straight' || part.type === 'bend' || part.type === 'reducer' || part.type === 'sketch2d')) {
+    if (part && (part.type === 'straight' || part.type === 'bend' || part.type === 'reducer' || part.type === 'sketch2d' || part.type === 'sketch3d')) {
       currentViewingPartId.value = part.id
       currentPartType.value = part.type
       editingPartId.value = part.id
@@ -158,8 +175,17 @@ export function usePartManager(assemblyItems, historyItems, uiState) {
           detail: { ...pipeParams.value, type: part.type }
         }))
       }
-      
-      if (part.type !== 'sketch2d') {
+
+      if (part.type === 'sketch3d') {
+        if (!pipeParams.value.pathData3d) {
+          pipeParams.value.pathData3d = { segments: [] }
+        }
+        window.dispatchEvent(new CustomEvent('sketch3d-params-update', {
+          detail: { ...pipeParams.value, type: part.type }
+        }))
+      }
+
+      if (part.type !== 'sketch2d' && part.type !== 'sketch3d') {
         window.dispatchEvent(new CustomEvent('view-part', {
           detail: { ...part.params, type: part.type }
         }))
@@ -183,10 +209,15 @@ export function usePartManager(assemblyItems, historyItems, uiState) {
     
     // 对于2D草图建管，确保pathData被包含在保存的参数中
     if (currentPartType.value === 'sketch2d') {
-      // pathData应该已经通过事件同步到pipeParams.value.pathData
-      // 如果没有pathData，提示用户
       if (!params.pathData || !params.pathData.segments || params.pathData.segments.length === 0) {
         alert('请先绘制2D路径')
+        return false
+      }
+    }
+
+    if (currentPartType.value === 'sketch3d') {
+      if (!params.pathData3d || !params.pathData3d.segments || params.pathData3d.segments.length === 0) {
+        alert('请先在3D场景中绘制路径')
         return false
       }
     }

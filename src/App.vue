@@ -1,5 +1,7 @@
 <template>
   <div class="app">
+    <!-- 保存提示 -->
+    <div v-if="saveToast" class="save-toast">已保存</div>
     <!-- 工作空间切换器（右上角） -->
     <div class="workspace-switcher">
       <button 
@@ -21,8 +23,16 @@
     <!-- 顶部工具栏 -->
     <div class="top-toolbar" v-if="isViewingAssembly && assemblyItems && assemblyItems.length > 0">
       <div class="toolbar-group">
-        <button 
-          :class="['toolbar-btn', { active: !isRotationMode && !isJoinMode }]"
+        <button
+          :class="['toolbar-btn', { active: !isMoveMode && !isRotationMode && !isJoinMode && !isArrayMode }]"
+          @click="switchMode('browse')"
+          title="浏览模式"
+        >
+          <span class="toolbar-icon">{{ getToolbarIcon('view') }}</span>
+          <span class="toolbar-text">浏览</span>
+        </button>
+        <button
+          :class="['toolbar-btn', { active: isMoveMode }]"
           @click="switchMode('move')"
           title="移动模式"
         >
@@ -144,10 +154,10 @@
                 v-if="item.type === 'array-group'"
                 class="submenu-item submenu-folder"
               >
-                <div class="folder-header" @click.stop="toggleArrayGroup(item.id)">
+                <div class="folder-header" @click.stop="selectFolderChildren(item.id)">
                   <span class="folder-icon">{{ getFolderIcon(arrayGroupExpanded.get(item.id)) }}</span>
                   <span class="submenu-item-text">{{ item.name }}</span>
-                  <span class="folder-arrow">{{ getFolderArrowIcon(arrayGroupExpanded.get(item.id)) }}</span>
+                  <span class="folder-arrow" @click.stop="toggleArrayGroup(item.id)">{{ getFolderArrowIcon(arrayGroupExpanded.get(item.id)) }}</span>
                 </div>
                 <div 
                   v-if="arrayGroupExpanded.get(item.id)" 
@@ -158,7 +168,7 @@
                     :key="child.id"
                     class="submenu-item submenu-item-child"
                     :class="{ 'selected': selectedAssemblyItems.has(child.id) }"
-                    @click.stop="toggleAssemblyItemSelection(child.id)"
+                    @click.stop="handleAssemblyItemClick($event, child.id)"
                   >
                     <span class="submenu-item-icon">{{ getPartIcon(child.type) }}</span>
                     <span class="submenu-item-text">{{ child.name || `管道 ${child.id}` }}</span>
@@ -173,7 +183,7 @@
                 v-else
                 class="submenu-item"
                 :class="{ 'selected': selectedAssemblyItems.has(item.id) }"
-                @click="toggleAssemblyItemSelection(item.id)"
+                @click="handleAssemblyItemClick($event, item.id)"
               >
                 <span class="submenu-item-icon">{{ getPartIcon(item.type) }}</span>
                 <span class="submenu-item-text">{{ item.name }}</span>
@@ -642,6 +652,12 @@
             <span class="hint-text">请在左侧2D面板中绘制路径（直线和圆弧），右侧将实时预览3D管道</span>
           </div>
         </div>
+        <!-- 3D草图建管提示 -->
+        <div v-if="currentPartType === 'sketch3d'" class="param-item">
+          <div class="param-hint">
+            <span class="hint-text">在3D场景中左键点击放置路径点，Tab切换工作平面，Ctrl+Z撤销，Enter确认</span>
+          </div>
+        </div>
         <!-- 变径管截面参数 -->
         <div v-if="currentPartType === 'reducer'" class="param-item">
           <div class="param-header-row">
@@ -719,7 +735,7 @@
           </div>
         </div>
         <div class="param-actions">
-          <button class="param-btn param-btn-primary" @click="savePipe">{{ editingPartId ? '保存' : '创建' }}</button>
+          <button class="param-btn param-btn-primary" @click="savePipe(); flushPersist()">{{ editingPartId ? '保存' : '创建' }}</button>
           <button class="param-btn param-btn-secondary" @click="closePipeParams">取消</button>
         </div>
       </div>
@@ -741,6 +757,13 @@
       <div class="controls">
         <button @click="resetCamera">重置相机</button>
         <button @click="switchCamera">{{ cameraMode === 'perspective' ? '透视' : '正交' }}</button>
+        <button @click="switchRendererType">{{ rendererType === 'webgl' ? 'WebGL' : 'WebGPU' }}</button>
+        <template v-if="isViewingAssembly">
+          <button @click="lodAutoMode = !lodAutoMode">{{ lodAutoMode ? '自动优化' : '手动优化' }}</button>
+          <label v-if="!lodAutoMode" style="display:flex;align-items:center;gap:4px;color:#ccc;font-size:12px;">
+            细分 <input type="number" v-model.number="lodManualSegments" min="3" max="16" style="width:40px;background:#333;color:#fff;border:1px solid #555;border-radius:3px;text-align:center;" @change="applyManualLod" />
+          </label>
+        </template>
         <button @click="clearAllData" class="danger-btn">清除所有</button>
       </div>
     </div>
@@ -889,7 +912,7 @@
           <button 
             class="param-btn param-btn-primary" 
             :disabled="arraySelection.length === 0 || arraySpacing <= 0 || arrayCount < 1"
-            @click="executeArray(arraySelection)"
+            @click="executeArrayWithLoading"
           >
             执行阵列
           </button>
@@ -1055,6 +1078,15 @@
       v-model:show="showWorkspaceSelector"
       @workspace-selected="handleWorkspaceSelected"
     />
+    <!-- 阵列执行遮罩 -->
+    <div v-if="arrayLoading" class="dialog-overlay" style="z-index:9999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.5);">
+      <div style="color:#fff;font-size:16px;text-align:center;">
+        <div style="margin-bottom:8px;">{{ arrayLoadingText }}</div>
+        <div style="width:200px;height:4px;background:rgba(255,255,255,0.2);border-radius:2px;overflow:hidden;">
+          <div style="height:100%;background:#4fc3f7;border-radius:2px;transition:width 0.2s;" :style="{ width: arrayLoadingProgress + '%' }"></div>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -1070,13 +1102,14 @@ import { useTransformLogic } from './composables/useTransformLogic.js'
 import { useJoinLogic } from './composables/useJoinLogic.js'
 import { loadRecords, saveRecords, clearRecords } from './utils/persistence/localRecordsStore.js'
 import { exportToExcel, importFromExcel } from './utils/excelManager.js'
-import { 
-  getCurrentWorkspaceId, 
-  getWorkspaces, 
+import {
+  getCurrentWorkspaceId,
+  getWorkspaces,
   shouldShowWorkspaceSelector,
   setCurrentWorkspaceId,
   getWorkspaceData
 } from './utils/workspaceManager.js'
+import { initDB, flushDB } from './utils/sqliteStore.js'
 import { 
   getPartTypeIcon, 
   getHistoryTypeIcon, 
@@ -1099,6 +1132,30 @@ const exportSubdivision = ref(0)
 
 // 阵列文件夹展开状态
 const arrayGroupExpanded = ref(new Map())
+
+// 阵列执行遮罩
+const arrayLoading = ref(false)
+const arrayLoadingText = ref('正在执行阵列...')
+const arrayLoadingProgress = ref(0)
+
+// LOD 自动/手动切换
+const lodAutoMode = ref(true)
+const lodManualSegments = ref(8)
+const applyManualLod = () => {
+  const v = Math.max(3, Math.min(16, lodManualSegments.value))
+  lodManualSegments.value = v
+  window.dispatchEvent(new CustomEvent('lod-mode-change', { detail: { auto: false, segments: v } }))
+}
+watch(lodAutoMode, (val) => {
+  if (val) {
+    window.dispatchEvent(new CustomEvent('lod-mode-change', { detail: { auto: true } }))
+  } else {
+    applyManualLod()
+  }
+})
+
+// 移动模式（默认为浏览模式，isMoveMode=false）
+const isMoveMode = ref(false)
 
 // 装配项多选状态
 const selectedAssemblyItems = ref(new Set())
@@ -1212,24 +1269,33 @@ const switchMode = (mode) => {
     isRotationMode.value = false
     isArrayMode.value = false
     isJoinMode.value = false
-    
-    // Clear selections
+    isMoveMode.value = false
+
+    // 阵列模式保留已选中的管道
+    if (mode !== 'array') {
+      selectedAssemblyItems.value.clear()
+      notifySelectionChanged()
+    }
     selectedAssemblyItemId.value = null
-    selectedAssemblyItems.value.clear()
-    notifySelectionChanged()
     resetJoinSelection()
-    
+
     // Set specific mode
-    if (mode === 'rotate') {
+    if (mode === 'move') {
+        isMoveMode.value = true
+    } else if (mode === 'rotate') {
         isRotationMode.value = true
     } else if (mode === 'array') {
         isArrayMode.value = true
     } else if (mode === 'join') {
         isJoinMode.value = true
     }
+    // mode === 'browse' 时所有都是 false，即浏览模式
 }
 
 // Watchers to dispatch events to ThreeScene
+watch(isMoveMode, (val) => {
+    window.dispatchEvent(new CustomEvent('move-mode-toggle', { detail: { enabled: val } }))
+})
 watch(isRotationMode, (val) => {
     window.dispatchEvent(new CustomEvent('rotation-mode-toggle', { detail: { enabled: val } }))
 })
@@ -1518,14 +1584,47 @@ const initializeWorkspace = () => {
   }
 }
 
-initializeWorkspace()
-
 watch([partsItems, assemblyItems, historyItems], () => {
   schedulePersist()
 }, { deep: true })
 
 const handleBeforeUnload = () => {
   flushPersist()
+  flushDB()
+}
+
+// --- Ctrl+S 手动保存 ---
+const saveToast = ref(false)
+let saveToastTimer = null
+
+const handleKeyboardSave = (e) => {
+  if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+    e.preventDefault()
+    flushPersist()
+    flushDB()
+    // 显示保存提示
+    saveToast.value = true
+    if (saveToastTimer) clearTimeout(saveToastTimer)
+    saveToastTimer = setTimeout(() => { saveToast.value = false }, 1500)
+  }
+}
+
+// --- 多窗口同步：监听其他窗口的 localStorage 变更 ---
+const handleStorageChange = (e) => {
+  if (!e.key) return
+  const currentId = getCurrentWorkspaceId()
+  if (!currentId) return
+  // 当前工作空间数据被其他窗口修改时，重新加载
+  const dataKey = '3dbuild.workspace.data.' + currentId
+  if (e.key === dataKey) {
+    hydrateRecordsFromStorage(currentId)
+    // 通知3D场景刷新
+    if (isViewingAssembly.value) {
+      nextTick(() => {
+        window.dispatchEvent(new CustomEvent('view-assembly', { detail: { items: assemblyItems.value } }))
+      })
+    }
+  }
 }
 
 // --- Event Handlers for 3D Interactions ---
@@ -1679,6 +1778,25 @@ const arraySelection = computed(() => {
   return Array.from(selectedAssemblyItems.value)
 })
 
+const executeArrayWithLoading = async () => {
+  const sel = arraySelection.value
+  if (sel.length === 0) return
+  arrayLoading.value = true
+  arrayLoadingText.value = '正在执行阵列...'
+  arrayLoadingProgress.value = 0
+  await new Promise(r => requestAnimationFrame(r))
+  try {
+    executeArray(sel, (progress) => {
+      arrayLoadingProgress.value = progress
+    })
+    arrayLoadingProgress.value = 100
+    arrayLoadingText.value = '阵列完成'
+    await new Promise(r => setTimeout(r, 300))
+  } finally {
+    arrayLoading.value = false
+  }
+}
+
 // 处理2D草图路径数据同步
 const handleSketch2DPathDataSync = (event) => {
   if (currentPartType.value === 'sketch2d' && event.detail) {
@@ -1687,10 +1805,27 @@ const handleSketch2DPathDataSync = (event) => {
   }
 }
 
-onMounted(() => {
+// 处理3D草图路径数据同步
+const handleSketch3DPathDataSync = (event) => {
+  if (currentPartType.value === 'sketch3d' && event.detail) {
+    pipeParams.value.pathData3d = JSON.parse(JSON.stringify(event.detail))
+  }
+}
+
+const dbReady = ref(false)
+
+onMounted(async () => {
+  // 初始化 SQLite 数据库
+  await initDB()
+  dbReady.value = true
+  initializeWorkspace()
+
   // 如果已经有工作空间，更新名称显示
   updateCurrentWorkspaceName()
   window.addEventListener('beforeunload', handleBeforeUnload)
+  window.addEventListener('keydown', handleKeyboardSave)
+  window.addEventListener('storage', handleStorageChange)
+  window.addEventListener('renderer-switched', handleRendererSwitched)
   window.addEventListener('assembly-item-drag-ended', handleDragEnded)
   window.addEventListener('assembly-items-batch-drag-ended', handleBatchDragEnded)
   window.addEventListener('assembly-item-rotation-ended', handleRotationEnded)
@@ -1702,6 +1837,7 @@ onMounted(() => {
   window.addEventListener('end-face-selected', handleEndFaceSelected)
   window.addEventListener('toggle-assembly-item-selection', handleToggleAssemblyItemSelection)
   window.addEventListener('sketch2d-pathdata-sync', handleSketch2DPathDataSync)
+  window.addEventListener('sketch3d-pathdata-sync', handleSketch3DPathDataSync)
   
   // 初始化时通知ThreeScene菜单宽度
   window.dispatchEvent(new CustomEvent('menu-width-changed', { detail: { width: menuWidth.value } }))
@@ -1709,6 +1845,9 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   window.removeEventListener('beforeunload', handleBeforeUnload)
+  window.removeEventListener('keydown', handleKeyboardSave)
+  window.removeEventListener('storage', handleStorageChange)
+  window.removeEventListener('renderer-switched', handleRendererSwitched)
   window.removeEventListener('assembly-item-drag-ended', handleDragEnded)
   window.removeEventListener('assembly-items-batch-drag-ended', handleBatchDragEnded)
   window.removeEventListener('assembly-item-rotation-ended', handleRotationEnded)
@@ -1720,6 +1859,7 @@ onBeforeUnmount(() => {
   window.removeEventListener('end-face-selected', handleEndFaceSelected)
   window.removeEventListener('toggle-assembly-item-selection', handleToggleAssemblyItemSelection)
   window.removeEventListener('sketch2d-pathdata-sync', handleSketch2DPathDataSync)
+  window.removeEventListener('sketch3d-pathdata-sync', handleSketch3DPathDataSync)
 })
 
 // --- App-Specific Logic (Computed & Methods) ---
@@ -1777,6 +1917,54 @@ const toggleArrayGroup = (groupId) => {
 }
 
 // 切换装配项选中状态
+let lastClickedItemId = null
+
+// 获取列表中所有可选项的平铺顺序
+const getFlatSelectableIds = () => {
+  const ids = []
+  topLevelAssemblyItems.value.forEach(item => {
+    if (item.type === 'array-group') {
+      if (arrayGroupExpanded.value.get(item.id)) {
+        getArrayGroupChildren(item.id).forEach(child => ids.push(child.id))
+      }
+    } else {
+      ids.push(item.id)
+    }
+  })
+  return ids
+}
+
+const handleAssemblyItemClick = (event, itemId) => {
+  if (event.ctrlKey || event.metaKey) {
+    // Ctrl+点击：逐个toggle
+    toggleAssemblyItemSelection(itemId)
+  } else if (event.shiftKey && lastClickedItemId) {
+    // Shift+点击：范围选择
+    const flat = getFlatSelectableIds()
+    const from = flat.indexOf(lastClickedItemId)
+    const to = flat.indexOf(itemId)
+    if (from !== -1 && to !== -1) {
+      const start = Math.min(from, to)
+      const end = Math.max(from, to)
+      for (let i = start; i <= end; i++) {
+        selectedAssemblyItems.value.add(flat[i])
+      }
+      notifySelectionChanged()
+    }
+    return // 不更新 lastClickedItemId
+  } else {
+    // 普通点击：toggle单选
+    if (selectedAssemblyItems.value.size === 1 && selectedAssemblyItems.value.has(itemId)) {
+      selectedAssemblyItems.value.clear()
+    } else {
+      selectedAssemblyItems.value.clear()
+      selectedAssemblyItems.value.add(itemId)
+    }
+    notifySelectionChanged()
+  }
+  lastClickedItemId = itemId
+}
+
 const toggleAssemblyItemSelection = (itemId) => {
   if (selectedAssemblyItems.value.has(itemId)) {
     selectedAssemblyItems.value.delete(itemId)
@@ -1787,7 +1975,15 @@ const toggleAssemblyItemSelection = (itemId) => {
   notifySelectionChanged()
 }
 
-// 通知3D场景选中状态变化
+const selectFolderChildren = (groupId) => {
+  const children = getArrayGroupChildren(groupId)
+  const allSelected = children.length > 0 && children.every(c => selectedAssemblyItems.value.has(c.id))
+  selectedAssemblyItems.value.clear()
+  if (!allSelected) {
+    children.forEach(child => selectedAssemblyItems.value.add(child.id))
+  }
+  notifySelectionChanged()
+}
 const notifySelectionChanged = () => {
   const selectedIds = Array.from(selectedAssemblyItems.value)
   window.dispatchEvent(new CustomEvent('assembly-selection-changed', {
@@ -1847,8 +2043,8 @@ const isAllAssemblyItemsSelected = computed(() => {
 watch(assemblyItems, (newItems) => {
   newItems.forEach(item => {
     if (item.type === 'array-group') {
-      // 如果数据中有 expanded 属性，使用它；否则默认展开
-      const shouldExpand = item.expanded !== undefined ? item.expanded : true
+      // 如果数据中有 expanded 属性，使用它；否则默认折叠
+      const shouldExpand = item.expanded !== undefined ? item.expanded : false
       if (!arrayGroupExpanded.value.has(item.id)) {
         arrayGroupExpanded.value.set(item.id, shouldExpand)
       }
@@ -2012,7 +2208,8 @@ const currentModeTitle = computed(() => {
     if (isJoinMode.value) return '拼接模式'
     else if (isRotationMode.value) return '旋转模式'
     else if (isArrayMode.value) return '阵列模式'
-    else return '装配体浏览模式'
+    else if (isMoveMode.value) return '移动模式'
+    else return '浏览模式'
   } else if (showPipeParams.value) {
     if (currentPartType.value === 'sketch2d') return '2D草图建管模式'
     else if (currentPartType.value === 'straight') return '直管编辑模式'
@@ -2060,15 +2257,23 @@ const currentInstructions = computed(() => {
     ]
   }
 
-  // 装配体浏览模式 - 移动模式
-  if (isViewingAssembly.value && !isRotationMode.value && !isJoinMode.value) {
+  // 装配体浏览模式
+  if (isViewingAssembly.value && !isMoveMode.value && !isRotationMode.value && !isJoinMode.value && !isArrayMode.value) {
+    return [
+      { key: '🖱️ 左键拖动', desc: '旋转视角' },
+      { key: '🖱️ 右键拖动', desc: '平移视角' },
+      { key: '🖱️ 滚轮', desc: '缩放视角' }
+    ]
+  }
+
+  // 装配体移动模式
+  if (isViewingAssembly.value && isMoveMode.value) {
     return [
       { key: '🖱️ 左键拖动', desc: '旋转视角' },
       { key: '🖱️ 右键拖动', desc: '平移视角' },
       { key: '🖱️ 滚轮', desc: '缩放视角' },
       { key: '🖱️ 点击管道', desc: '选择要移动的管道' },
-      { key: '🖱️ 拖动管道', desc: '在相机视角平面移动管道' },
-      { key: '⌨️ 输入坐标', desc: '在参数面板输入精确位置' }
+      { key: '🖱️ 拖动管道', desc: '在相机视角平面移动管道' }
     ]
   }
   
@@ -2134,6 +2339,15 @@ const resetCamera = () => {
 }
 const switchCamera = () => {
     cameraMode.value = cameraMode.value === 'perspective' ? 'orthographic' : 'perspective'
+    window.dispatchEvent(new CustomEvent('switch-camera'))
+}
+
+const rendererType = ref('webgl')
+const switchRendererType = () => {
+    window.dispatchEvent(new CustomEvent('switch-renderer'))
+}
+const handleRendererSwitched = (event) => {
+    rendererType.value = event.detail.type
 }
 
 // Excel 导入导出
