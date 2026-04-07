@@ -1102,21 +1102,22 @@ import { useAssemblyManager } from './composables/useAssemblyManager.js'
 import { useHistoryManager } from './composables/useHistoryManager.js'
 import { useTransformLogic } from './composables/useTransformLogic.js'
 import { useJoinLogic } from './composables/useJoinLogic.js'
-import { loadRecords, saveRecords, clearRecords } from './utils/persistence/localRecordsStore.js'
+import { usePersistence } from './composables/app/usePersistence.js'
+import { useEventBridge } from './composables/app/useEventBridge.js'
+import { useSelectionState } from './composables/app/useSelectionState.js'
 import { exportToExcel, importFromExcel } from './utils/excelManager.js'
 import {
   getCurrentWorkspaceId,
   getWorkspaces,
-  shouldShowWorkspaceSelector,
   setCurrentWorkspaceId,
   getWorkspaceData
 } from './utils/workspaceManager.js'
 import { initDB, flushDB } from './utils/sqliteStore.js'
-import { 
-  getPartTypeIcon, 
-  getHistoryTypeIcon, 
-  getToolbarIcon, 
-  getMenuIcon, 
+import {
+  getPartTypeIcon,
+  getHistoryTypeIcon,
+  getToolbarIcon,
+  getMenuIcon,
   getActionIcon,
   getFolderIcon,
   getFolderArrowIcon,
@@ -1160,8 +1161,8 @@ watch(lodAutoMode, (val) => {
 // 移动模式（默认为浏览模式，isMoveMode=false）
 const isMoveMode = ref(false)
 
-// 装配项多选状态
-const selectedAssemblyItems = ref(new Set())
+// 装配项多选状态 (will be initialized after topLevelAssemblyItems is defined)
+let selectedAssemblyItems = ref(new Set())
 
 // 菜单宽度（可调整）
 const getInitialMenuWidth = () => {
@@ -1318,139 +1319,7 @@ watch(isViewingAssembly, (val) => {
   }
 })
 
-// Handle Show Transform Panel Event (from 3D Scene)
-const handleShowTransformPanel = (event) => {
-  const { type, id, position, rotation } = event.detail
-  
-  // Set transform logic state
-  transformType.value = type
-  transformingItemId.value = id
-  
-  if (position) {
-    transformPosition.value = { ...position }
-  }
-  
-  if (rotation) {
-    transformRotation.value = { ...rotation }
-    // Convert to degrees if needed
-    transformRotationDeg.value = {
-        x: rotation.x * 180 / Math.PI,
-        y: rotation.y * 180 / Math.PI,
-        z: rotation.z * 180 / Math.PI
-    }
-  }
-  
-  // Show the panel
-  showTransformPanel.value = true
-  
-  // Close other overlapping panels
-  if (showPipeParams.value) closePipeParams()
-  if (showHistoryEdit.value) closeHistoryEdit()
-}
-
-// Handle Assembly Item Selected (for Rotation Mode)
-const handleAssemblyItemSelected = (event) => {
-  const { id } = event.detail
-  selectedAssemblyItemId.value = id
-  updateRotationAxis()
-}
-
-// Handle Position Updates (Real-time sync)
-const handleAssemblyItemPositionUpdated = (event) => {
-  const { id, position, isUserInput } = event.detail
-  
-  // Sync internal data model
-  const item = assemblyItems.value.find(i => i.id === id)
-  if (item) {
-    item.position = { ...position }
-  }
-  
-  // Sync parameter panel if it's open and editing this item
-  if (showTransformPanel.value && transformingItemId.value === id && transformType.value === 'move' && !isUserInput) {
-    transformPosition.value = { ...position }
-  }
-}
-
-// Handle Rotation Updates (Real-time sync)
-const handleAssemblyItemRotationUpdated = (event) => {
-  const { id, rotation, isUserInput } = event.detail
-  
-  // Sync internal data model
-  const item = assemblyItems.value.find(i => i.id === id)
-  if (item) {
-    item.rotation = { ...rotation }
-  }
-  
-  // Sync rotation mode UI if selected and update is not from the input itself (avoid loop/cursor jump)
-  if (selectedAssemblyItemId.value === id && !isUserInput) {
-      updateRotationAxis()
-  }
-  
-  // Sync parameter panel if it's open and editing this item
-  if (showTransformPanel.value && transformingItemId.value === id && transformType.value === 'rotate' && !isUserInput) {
-    transformRotation.value = { ...rotation }
-    transformRotationDeg.value = {
-      x: rotation.x * 180 / Math.PI,
-      y: rotation.y * 180 / Math.PI,
-      z: rotation.z * 180 / Math.PI
-    }
-  }
-}
-
-// Handle End Face Selection (for Join Mode)
-const handleEndFaceSelected = (event) => {
-  if (!isJoinMode.value) return
-  
-  const { index, assemblyItemId, endFaceType } = event.detail
-  
-  // 处理取消选择的情况
-  if (assemblyItemId === null || endFaceType === null) {
-    if (index === 1) {
-      firstSelectedEndFace.value = null
-    } else if (index === 2) {
-      secondSelectedEndFace.value = null
-    }
-    // 清除预览
-    window.dispatchEvent(new CustomEvent('clear-join-preview'))
-    return
-  }
-  
-  // 查找对应的装配体项以获取名称
-  const assemblyItem = assemblyItems.value.find(item => item.id === assemblyItemId)
-  if (!assemblyItem) return
-  
-  // 构建端面信息对象
-  const endFaceInfo = {
-    assemblyItemId: assemblyItemId,
-    endFaceType: endFaceType,
-    pipeName: assemblyItem.name || `管道 ${assemblyItemId}`
-  }
-  
-  // 根据index更新对应的选择
-  if (index === 1) {
-    firstSelectedEndFace.value = endFaceInfo
-  } else if (index === 2) {
-    secondSelectedEndFace.value = endFaceInfo
-  }
-  
-  // 如果两个端面都选好了，但不自动预览（需要先点击确定拼接）
-}
-
-// 预览拼接旋转角度（只有在管道已经移动到位置后才能预览）
-const previewJoinRotation = () => {
-  if (!isJoinMode.value || !firstSelectedEndFace.value || !secondSelectedEndFace.value) return
-  if (!isJoinPositioned.value) return // 只有在管道已经移动到位置后才能预览角度
-  
-  // 发送预览事件到 ThreeScene
-  window.dispatchEvent(new CustomEvent('preview-join-angle', {
-    detail: {
-      firstEndFace: firstSelectedEndFace.value,
-      secondEndFace: secondSelectedEndFace.value,
-      moveFirst: moveFirstPipe.value,
-      rotationAngle: joinRotationAngle.value
-    }
-  }))
-}
+// (Event handlers extracted to useEventBridge composable above)
 
 // --- Workspace Management ---
 const showWorkspaceSelector = ref(false)
@@ -1509,265 +1378,40 @@ const handleWorkspaceSelected = (workspaceId) => {
   })
 }
 
-// --- Records Persistence (localStorage) ---
-let suppressPersist = false
-let persistTimer = null
-const PERSIST_DEBOUNCE_MS = 350
-
-const hydrateRecordsFromStorage = (workspaceId = null) => {
-  suppressPersist = true
-  
-  // 如果提供了工作空间ID，使用它；否则从localStorage获取
-  const targetWorkspaceId = workspaceId || getCurrentWorkspaceId()
-  if (!targetWorkspaceId) {
-    // 如果没有工作空间ID，清空所有数据
-    partsItems.value = []
-    assemblyItems.value = []
-    historyItems.value = []
-    suppressPersist = false
-    return
-  }
-  
-  // 直接使用工作空间ID获取数据，确保获取到正确的数据
-  const persisted = getWorkspaceData(targetWorkspaceId)
-  
-  // 确保使用新数组，触发响应式更新
-  partsItems.value = Array.isArray(persisted.partsItems) ? [...persisted.partsItems] : []
-  assemblyItems.value = Array.isArray(persisted.assemblyItems) ? [...persisted.assemblyItems] : []
-  historyItems.value = Array.isArray(persisted.historyItems) ? [...persisted.historyItems] : []
-  suppressPersist = false
-}
-
-const persistNow = () => {
-  if (suppressPersist) return
-  saveRecords({
-    partsItems: partsItems.value,
-    assemblyItems: assemblyItems.value,
-    historyItems: historyItems.value
-  })
-}
-
-const schedulePersist = () => {
-  if (suppressPersist) return
-  if (persistTimer) window.clearTimeout(persistTimer)
-  persistTimer = window.setTimeout(() => {
-    persistTimer = null
-    persistNow()
-  }, PERSIST_DEBOUNCE_MS)
-}
-
-const flushPersist = () => {
-  if (suppressPersist) return
-  if (persistTimer) {
-    window.clearTimeout(persistTimer)
-    persistTimer = null
-  }
-  persistNow()
-}
+// --- Records Persistence (extracted to composable) ---
+const persistence = usePersistence(partsItems, assemblyItems, historyItems)
+const { hydrateRecordsFromStorage, flushPersist, saveToast } = persistence
 
 // 初始化时自动加载工作空间
 const initializeWorkspace = () => {
   const workspaces = getWorkspaces()
   const currentId = getCurrentWorkspaceId()
-  
-  // 如果有工作空间
   if (workspaces.length > 0) {
-    // 如果当前工作空间ID存在且有效，直接加载
     if (currentId && workspaces.some(ws => ws.id === currentId)) {
       hydrateRecordsFromStorage(currentId)
       updateCurrentWorkspaceName()
     } else {
-      // 否则自动选择第一个工作空间
       const firstWorkspace = workspaces[0]
       handleWorkspaceSelected(firstWorkspace.id)
     }
   } else {
-    // 如果没有工作空间，显示选择对话框
     showWorkspaceSelector.value = true
   }
 }
 
-watch([partsItems, assemblyItems, historyItems], () => {
-  schedulePersist()
-}, { deep: true })
-
-const handleBeforeUnload = () => {
-  flushPersist()
-  flushDB()
-}
-
-// --- Ctrl+S 手动保存 ---
-const saveToast = ref(false)
-let saveToastTimer = null
-
-const handleKeyboardSave = (e) => {
-  if ((e.ctrlKey || e.metaKey) && e.key === 's') {
-    e.preventDefault()
-    flushPersist()
-    flushDB()
-    // 显示保存提示
-    saveToast.value = true
-    if (saveToastTimer) clearTimeout(saveToastTimer)
-    saveToastTimer = setTimeout(() => { saveToast.value = false }, 1500)
-  }
-}
-
-// --- 多窗口同步：监听其他窗口的 localStorage 变更 ---
-const handleStorageChange = (e) => {
-  if (!e.key) return
-  const currentId = getCurrentWorkspaceId()
-  if (!currentId) return
-  // 当前工作空间数据被其他窗口修改时，重新加载
-  const dataKey = '3dbuild.workspace.data.' + currentId
-  if (e.key === dataKey) {
-    hydrateRecordsFromStorage(currentId)
-    // 通知3D场景刷新
-    if (isViewingAssembly.value) {
-      nextTick(() => {
-        window.dispatchEvent(new CustomEvent('view-assembly', { detail: { items: assemblyItems.value } }))
-      })
-    }
-  }
-}
-
-// --- Event Handlers for 3D Interactions ---
-
-const addOrMergeHistory = (newHistoryItem) => {
-  if (historyItems.value.length > 0) {
-    const lastItem = historyItems.value[0]
-    
-    // Check for mergeable 'move' operations
-    if (newHistoryItem.type === 'move' && lastItem.type === 'move' && lastItem.targetId === newHistoryItem.targetId) {
-      // Merge: Update the end position and time of the last item
-      lastItem.endPosition = { ...newHistoryItem.endPosition }
-      lastItem.time = newHistoryItem.time
-      // Optionally update name if it contains dynamic info, but "移动: [Name]" is usually static per object
-      return
-    }
-    
-    // Check for mergeable 'rotate' operations
-    if (newHistoryItem.type === 'rotate' && lastItem.type === 'rotate' && lastItem.targetId === newHistoryItem.targetId && lastItem.axis === newHistoryItem.axis) {
-      // Merge: Update the end rotation and time
-      lastItem.endRotation = { ...newHistoryItem.endRotation }
-      lastItem.time = newHistoryItem.time
-      return
-    }
-  }
-  
-  // If not merged, add as new item
-  historyItems.value.unshift(newHistoryItem)
-  
-  // Limit history size (optional, e.g., keep last 50)
-  if (historyItems.value.length > 50) {
-    historyItems.value.pop()
-  }
-}
-
-const handleDragEnded = (event) => {
-  const { id, endPosition, startPosition } = event.detail
-  const item = assemblyItems.value.find(i => i.id === id)
-  if (item) {
-    // 记录历史
-    const historyItem = {
-      id: `hist_${Date.now()}`,
-      type: 'move',
-      targetId: id,
-      name: `移动: ${item.name}`,
-      time: new Date().toLocaleTimeString(),
-      startPosition: { ...startPosition },
-      endPosition: { ...endPosition }
-    }
-    addOrMergeHistory(historyItem)
-
-    // 更新数据
-    item.position = { ...endPosition }
-  }
-}
-
-// 处理批量移动结束事件
-const handleBatchDragEnded = (event) => {
-  const { items } = event.detail
-  if (!items || items.length === 0) return
-  
-  // 更新所有移动项的数据
-  items.forEach(({ id, endPosition }) => {
-    const item = assemblyItems.value.find(i => i.id === id)
-    if (item) {
-      item.position = { ...endPosition }
-    }
-  })
-  
-  // 创建一条批量移动历史记录
-  const itemNames = items.map(({ id }) => {
-    const item = assemblyItems.value.find(i => i.id === id)
-    return item ? item.name : `管道 ${id}`
-  }).join('、')
-  
-  const historyItem = {
-    id: `hist_${Date.now()}`,
-    type: 'move',
-    targetId: items[0].id, // 使用第一个项作为主要目标ID（用于兼容性）
-    name: `批量移动: ${itemNames}`,
-    time: new Date().toLocaleTimeString(),
-    isBatch: true, // 标记为批量操作
-    batchItems: items.map(({ id, startPosition, endPosition }) => ({
-      id,
-      startPosition: { ...startPosition },
-      endPosition: { ...endPosition }
-    }))
-  }
-  
-  addOrMergeHistory(historyItem)
-}
-
-const handleRotationEnded = (event) => {
-  const { id, endRotation, startRotation, axis } = event.detail
-  const item = assemblyItems.value.find(i => i.id === id)
-  if (item) {
-    // 记录历史
-    const historyItem = {
-      id: `hist_${Date.now()}`,
-      type: 'rotate',
-      targetId: id,
-      name: `旋转: ${item.name}`,
-      time: new Date().toLocaleTimeString(),
-      startRotation: { ...startRotation },
-      endRotation: { ...endRotation },
-      axis: axis
-    }
-    addOrMergeHistory(historyItem)
-
-    // 更新数据
-    item.rotation = { ...endRotation }
-  }
-}
-
-const handleJoinCompleted = (event) => {
-  const { movedItemId, position, rotation } = event.detail
-  const item = assemblyItems.value.find(i => i.id === movedItemId)
-  if (item) {
-    // 记录历史
-    const historyItem = {
-      id: `hist_${Date.now()}`,
-      type: 'join',
-      targetId: movedItemId,
-      name: `拼接: ${item.name}`,
-      time: new Date().toLocaleTimeString(),
-      oldPosition: { ...item.position },
-      oldRotation: { ...item.rotation },
-      newPosition: { ...position },
-      newRotation: { ...rotation }
-    }
-    // Joining is usually a distinct operation, but if we wanted to merge, we could check type='join'
-    // However, joining twice usually implies joining to different things or undoing/redoing.
-    // For now, we just add it.
-    historyItems.value.unshift(historyItem)
-
-    // 更新数据
-    item.position = { ...position }
-    item.rotation = { ...rotation }
-  }
-}
+// --- Event Bridge (extracted to composable) ---
+const eventBridge = useEventBridge(assemblyItems, historyItems, {
+  transformType, transformingItemId, transformPosition, transformRotation, transformRotationDeg,
+  showTransformPanel, closePipeParams, closeHistoryEdit, showPipeParams, showHistoryEdit
+}, joinLogic, {
+  selectedAssemblyItemId, updateRotationAxis, currentPartType, pipeParams
+})
+const { rendererType, previewJoinRotation,
+  handleDragEnded, handleBatchDragEnded, handleRotationEnded, handleJoinCompleted,
+  handleShowTransformPanel, handleAssemblyItemSelected, handleAssemblyItemPositionUpdated,
+  handleAssemblyItemRotationUpdated, handleEndFaceSelected,
+  handleSketch2DPathDataSync, handleSketch3DPathDataSync, handleRendererSwitched
+} = eventBridge
 
 // 处理切换装配项选择事件（用于阵列模式）
 const handleToggleAssemblyItemSelection = (event) => {
@@ -1800,20 +1444,7 @@ const executeArrayWithLoading = async () => {
   }
 }
 
-// 处理2D草图路径数据同步
-const handleSketch2DPathDataSync = (event) => {
-  if (currentPartType.value === 'sketch2d' && event.detail) {
-    // 同步pathData到pipeParams，确保保存时能获取到最新数据
-    pipeParams.value.pathData = JSON.parse(JSON.stringify(event.detail))
-  }
-}
-
-// 处理3D草图路径数据同步
-const handleSketch3DPathDataSync = (event) => {
-  if (currentPartType.value === 'sketch3d' && event.detail) {
-    pipeParams.value.pathData3d = JSON.parse(JSON.stringify(event.detail))
-  }
-}
+// (Sketch path data sync handlers extracted to useEventBridge)
 
 const dbReady = ref(false)
 
@@ -1825,9 +1456,9 @@ onMounted(async () => {
 
   // 如果已经有工作空间，更新名称显示
   updateCurrentWorkspaceName()
-  window.addEventListener('beforeunload', handleBeforeUnload)
-  window.addEventListener('keydown', handleKeyboardSave)
-  window.addEventListener('storage', handleStorageChange)
+  window.addEventListener('beforeunload', persistence.handleBeforeUnload)
+  window.addEventListener('keydown', persistence.handleKeyboardSave)
+  window.addEventListener('storage', persistence.handleStorageChange)
   window.addEventListener('renderer-switched', handleRendererSwitched)
   window.addEventListener('assembly-item-drag-ended', handleDragEnded)
   window.addEventListener('assembly-items-batch-drag-ended', handleBatchDragEnded)
@@ -1847,9 +1478,9 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
-  window.removeEventListener('beforeunload', handleBeforeUnload)
-  window.removeEventListener('keydown', handleKeyboardSave)
-  window.removeEventListener('storage', handleStorageChange)
+  window.removeEventListener('beforeunload', persistence.handleBeforeUnload)
+  window.removeEventListener('keydown', persistence.handleKeyboardSave)
+  window.removeEventListener('storage', persistence.handleStorageChange)
   window.removeEventListener('renderer-switched', handleRendererSwitched)
   window.removeEventListener('assembly-item-drag-ended', handleDragEnded)
   window.removeEventListener('assembly-items-batch-drag-ended', handleBatchDragEnded)
@@ -1919,128 +1550,13 @@ const toggleArrayGroup = (groupId) => {
   arrayGroupExpanded.value.set(groupId, !current)
 }
 
-// 切换装配项选中状态
-let lastClickedItemId = null
-
-// 获取列表中所有可选项的平铺顺序
-const getFlatSelectableIds = () => {
-  const ids = []
-  topLevelAssemblyItems.value.forEach(item => {
-    if (item.type === 'array-group') {
-      if (arrayGroupExpanded.value.get(item.id)) {
-        getArrayGroupChildren(item.id).forEach(child => ids.push(child.id))
-      }
-    } else {
-      ids.push(item.id)
-    }
-  })
-  return ids
-}
-
-const handleAssemblyItemClick = (event, itemId) => {
-  if (event.ctrlKey || event.metaKey) {
-    // Ctrl+点击：逐个toggle
-    toggleAssemblyItemSelection(itemId)
-  } else if (event.shiftKey && lastClickedItemId) {
-    // Shift+点击：范围选择
-    const flat = getFlatSelectableIds()
-    const from = flat.indexOf(lastClickedItemId)
-    const to = flat.indexOf(itemId)
-    if (from !== -1 && to !== -1) {
-      const start = Math.min(from, to)
-      const end = Math.max(from, to)
-      for (let i = start; i <= end; i++) {
-        selectedAssemblyItems.value.add(flat[i])
-      }
-      notifySelectionChanged()
-    }
-    return // 不更新 lastClickedItemId
-  } else {
-    // 普通点击：toggle单选
-    if (selectedAssemblyItems.value.size === 1 && selectedAssemblyItems.value.has(itemId)) {
-      selectedAssemblyItems.value.clear()
-    } else {
-      selectedAssemblyItems.value.clear()
-      selectedAssemblyItems.value.add(itemId)
-    }
-    notifySelectionChanged()
-  }
-  lastClickedItemId = itemId
-}
-
-const toggleAssemblyItemSelection = (itemId) => {
-  if (selectedAssemblyItems.value.has(itemId)) {
-    selectedAssemblyItems.value.delete(itemId)
-  } else {
-    selectedAssemblyItems.value.add(itemId)
-  }
-  // 通知3D场景更新高亮
-  notifySelectionChanged()
-}
-
-const selectFolderChildren = (groupId) => {
-  const children = getArrayGroupChildren(groupId)
-  const allSelected = children.length > 0 && children.every(c => selectedAssemblyItems.value.has(c.id))
-  selectedAssemblyItems.value.clear()
-  if (!allSelected) {
-    children.forEach(child => selectedAssemblyItems.value.add(child.id))
-  }
-  notifySelectionChanged()
-}
-const notifySelectionChanged = () => {
-  const selectedIds = Array.from(selectedAssemblyItems.value)
-  window.dispatchEvent(new CustomEvent('assembly-selection-changed', {
-    detail: { selectedIds }
-  }))
-}
-
-// 全选/取消全选装配项
-const toggleSelectAllAssemblyItems = () => {
-  if (isAllAssemblyItemsSelected.value) {
-    // 取消全选：清除所有选中项
-    selectedAssemblyItems.value.clear()
-  } else {
-    // 全选：选中所有顶级项及其子项
-    selectedAssemblyItems.value.clear()
-    topLevelAssemblyItems.value.forEach(item => {
-      if (item.type === 'array-group') {
-        // 对于文件夹类型，选中所有子项
-        const children = getArrayGroupChildren(item.id)
-        children.forEach(child => {
-          selectedAssemblyItems.value.add(child.id)
-        })
-      } else {
-        // 对于普通项，直接选中
-        selectedAssemblyItems.value.add(item.id)
-      }
-    })
-  }
-  // 通知3D场景更新高亮
-  notifySelectionChanged()
-}
-
-// 计算是否所有装配项都已选中
-const isAllAssemblyItemsSelected = computed(() => {
-  if (topLevelAssemblyItems.value.length === 0) return false
-  
-  // 获取所有应该被选中的项（顶级项及其子项）
-  const allSelectableItems = new Set()
-  topLevelAssemblyItems.value.forEach(item => {
-    if (item.type === 'array-group') {
-      const children = getArrayGroupChildren(item.id)
-      children.forEach(child => {
-        allSelectableItems.add(child.id)
-      })
-    } else {
-      allSelectableItems.add(item.id)
-    }
-  })
-  
-  // 检查是否所有可选项都已选中
-  if (allSelectableItems.size === 0) return false
-  return allSelectableItems.size === selectedAssemblyItems.value.size &&
-         Array.from(allSelectableItems).every(id => selectedAssemblyItems.value.has(id))
-})
+// --- Selection State (extracted to composable) ---
+const selectionState = useSelectionState(assemblyItems, topLevelAssemblyItems, getArrayGroupChildren, arrayGroupExpanded)
+// Override the earlier placeholder
+selectedAssemblyItems = selectionState.selectedAssemblyItems
+const { handleAssemblyItemClick, toggleAssemblyItemSelection, selectFolderChildren,
+  notifySelectionChanged, toggleSelectAllAssemblyItems, isAllAssemblyItemsSelected,
+  getFlatSelectableIds } = selectionState
 
 // 初始化文件夹展开状态（从数据中读取）
 watch(assemblyItems, (newItems) => {
@@ -2345,12 +1861,8 @@ const switchCamera = () => {
     window.dispatchEvent(new CustomEvent('switch-camera'))
 }
 
-const rendererType = ref('webgl')
 const switchRendererType = () => {
     window.dispatchEvent(new CustomEvent('switch-renderer'))
-}
-const handleRendererSwitched = (event) => {
-    rendererType.value = event.detail.type
 }
 
 const readShadowsEnabled = () => {
@@ -2428,28 +1940,6 @@ const handleImportExcel = async (event) => {
 }
 
 const clearAllData = () => {
-    if(confirm('确定要清除所有数据吗？')) {
-        suppressPersist = true
-        if (persistTimer) {
-          window.clearTimeout(persistTimer)
-          persistTimer = null
-        }
-        clearRecords()
-
-        partsItems.value = []
-        assemblyItems.value = []
-        historyItems.value = []
-        // Reset modes
-        isViewingAssembly.value = false
-        showPipeParams.value = false
-        // Clear scene
-        window.dispatchEvent(new CustomEvent('clear-pipe-preview'))
-        window.dispatchEvent(new CustomEvent('view-assembly', { detail: [] }))
-
-        // 允许后续新操作继续落盘
-        window.setTimeout(() => {
-          suppressPersist = false
-        }, 0)
-    }
+    persistence.clearAllData(isViewingAssembly, showPipeParams)
 }
 </script>
