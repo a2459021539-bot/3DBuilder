@@ -54,7 +54,7 @@ import { createSketch2DPipe } from '../utils/sketch2dPipe.js'
 import { createSketch3DPipe } from '../utils/sketch3dPipe.js'
 import Sketch2DCanvas from './Sketch2DCanvas.vue'
 import { ExportManager } from '../utils/exportManager.js'
-import { buildBatchedProxy, clearBatchedProxy, updateBatchedProxyMatrices, unhideAllOriginals } from '../utils/batchedProxy.js'
+import { buildBatchedProxy, clearBatchedProxy, updateBatchedProxyMatrices, unhideAllOriginals, setBatchedProxyVisible } from '../utils/batchedProxy.js'
 import Stats from 'stats.js'
 
 /** 性能日志：控制台执行 localStorage.setItem('3dbuild.perfDebug','1') 后刷新；或地址栏 ?perfDebug=1。关闭：removeItem 或设 0 */
@@ -1218,22 +1218,16 @@ const highlightPipeGroupForSelection = (pipeGroup) => {
   if (!pipeGroup) return
   pipeGroup.traverse((child) => {
     if (child instanceof THREE.Mesh && child.material) {
-      const material = child.material
-      
       if (!selectionHighlightMap.has(child)) {
-        selectionHighlightMap.set(child, {
-          color: material.color ? material.color.clone() : null,
-          emissive: material.emissive ? material.emissive.clone() : null
-        })
+        selectionHighlightMap.set(child, child.material)
       }
-      if (material.color) {
-        // 增加亮度，偏向黄色
-        material.color.offsetHSL(0.1, 0.2, 0.15)
+      // clone 材质避免修改共享实例
+      const mat = child.material.clone()
+      if (mat.emissive) {
+        mat.emissive.set(0xffaa00)
+        mat.emissiveIntensity = 0.6
       }
-      if (material.emissive) {
-        // 设置金色发光效果
-        material.emissive.set(0xffaa00)
-      }
+      child.material = mat
     }
   })
 }
@@ -1243,13 +1237,7 @@ const restorePipeGroupForSelection = (pipeGroup) => {
   if (!pipeGroup) return
   pipeGroup.traverse((child) => {
     if (child instanceof THREE.Mesh && selectionHighlightMap.has(child)) {
-      const original = selectionHighlightMap.get(child)
-      if (original.color && child.material && child.material.color) {
-        child.material.color.copy(original.color)
-      }
-      if (original.emissive && child.material && child.material.emissive) {
-        child.material.emissive.copy(original.emissive)
-      }
+      child.material = selectionHighlightMap.get(child)
       selectionHighlightMap.delete(child)
     }
   })
@@ -1258,30 +1246,26 @@ const restorePipeGroupForSelection = (pipeGroup) => {
 // 更新多选高亮状态
 const updateSelectionHighlight = (selectedIds) => {
   if (!previewPipe || !isAssemblyMode) return
-  
-  // 先清除所有现有的多选高亮
-  selectionHighlightMap.forEach((original, child) => {
-    if (child instanceof THREE.Mesh && child.material) {
-      if (original.color && child.material.color) {
-        child.material.color.copy(original.color)
-      }
-      if (original.emissive && child.material.emissive) {
-        child.material.emissive.copy(original.emissive)
-      }
+
+  // 先清除所有现有的多选高亮——换回原始材质
+  selectionHighlightMap.forEach((originalMaterial, child) => {
+    if (child instanceof THREE.Mesh) {
+      child.material = originalMaterial
     }
   })
   selectionHighlightMap.clear()
-  
-  // 更新选中的装配项ID集合
+
   selectedAssemblyItemIds.clear()
   if (selectedIds && selectedIds.length > 0) {
     selectedIds.forEach(id => {
       selectedAssemblyItemIds.add(id)
+      // 从合并mesh中弹出选中管道，使原始mesh可见
+      updateBatchedProxyMatrices(id)
       const pipeGroup = findPipeGroupByAssemblyId(id)
       if (pipeGroup) {
         highlightPipeGroupForSelection(pipeGroup)
-    }
-  })
+      }
+    })
   }
 }
 
@@ -1966,8 +1950,11 @@ const clearPipePreview = () => {
     // 清理资源
     if (previewPipe.children) {
       previewPipe.children.forEach(child => {
-        if (child.geometry) child.geometry.dispose()
-        if (child.material) child.material.dispose()
+        child.traverse(obj => {
+          if (obj.isMesh && obj.geometry) {
+            obj.geometry.dispose()
+          }
+        })
       })
     }
     previewPipe = null
@@ -2514,17 +2501,8 @@ const refinePipeObject = (pipeGroup) => {
   const params = { ...ud._originalParams, segments: nextSeg }
   const newGroup = createPipeObject(params, ud.assemblyItemId)
   if (!newGroup) return false
-  const pos = pipeGroup.position.clone()
-  const rot = pipeGroup.rotation.clone()
-  while (pipeGroup.children.length) {
-    pipeGroup.remove(pipeGroup.children[0])
-  }
-  // 移入新子对象
-  while (newGroup.children.length) {
-    pipeGroup.add(newGroup.children[0])
-  }
-  pipeGroup.position.copy(pos)
-  pipeGroup.rotation.copy(rot)
+  while (pipeGroup.children.length) pipeGroup.remove(pipeGroup.children[0])
+  while (newGroup.children.length) pipeGroup.add(newGroup.children[0])
   ud._lodSegments = nextSeg
   enableShadowsForObject(pipeGroup)
   freezeObjectSubtree(pipeGroup)
@@ -2549,16 +2527,8 @@ const degradeLod = () => {
   const params = { ...ud._originalParams, segments: prevSeg }
   const newGroup = createPipeObject(params, ud.assemblyItemId)
   if (!newGroup) return
-  const pos = target.position.clone()
-  const rot = target.rotation.clone()
-  while (target.children.length) {
-    target.remove(target.children[0])
-  }
-  while (newGroup.children.length) {
-    target.add(newGroup.children[0])
-  }
-  target.position.copy(pos)
-  target.rotation.copy(rot)
+  while (target.children.length) target.remove(target.children[0])
+  while (newGroup.children.length) target.add(newGroup.children[0])
   ud._lodSegments = prevSeg
   enableShadowsForObject(target)
   freezeObjectSubtree(target)
@@ -2600,7 +2570,7 @@ const scheduleProgressiveRefine = () => {
 }
 
 // 浏览总装配体
-const updateAssemblyView = (items, preserveCamera = false) => {
+const updateAssemblyView = (items, preserveCamera = false, forceRebuild = false) => {
   if (!scene) return
   
   // 阵列模式下刷新装配体时清除已选
@@ -2613,7 +2583,7 @@ const updateAssemblyView = (items, preserveCamera = false) => {
   const pipeItems = items.filter(item => item.type !== 'array-group')
   
   // 如果 preserveCamera 为 true，只更新现有对象的位置和旋转，不重新创建
-  if (preserveCamera && previewPipe && isAssemblyMode) {
+  if (preserveCamera && !forceRebuild && previewPipe && isAssemblyMode) {
     // 确保 previewPipe 在场景中
     if (!scene.children.includes(previewPipe)) {
       scene.add(previewPipe)
@@ -2661,18 +2631,16 @@ const updateAssemblyView = (items, preserveCamera = false) => {
           pipeObj.userData._lodSegments = targetSeg
           pipeObj.userData._targetSegments = targetSeg
           pipeObj.userData._originalParams = paramsWithType
-          // 为管道启用阴影
-          enableShadowsForObject(newPipeObj)
+          enableShadowsForObject(pipeObj)
           if (item.position) {
-            newPipeObj.position.set(item.position.x, item.position.y, item.position.z)
+            pipeObj.position.set(item.position.x, item.position.y, item.position.z)
           }
           if (item.rotation) {
-            newPipeObj.rotation.set(item.rotation.x, item.rotation.y, item.rotation.z)
+            pipeObj.rotation.set(item.rotation.x, item.rotation.y, item.rotation.z)
           }
-          // 更新矩阵以确保正确显示
-          newPipeObj.updateMatrix()
-          newPipeObj.updateMatrixWorld(true)
-          previewPipe.add(newPipeObj)
+          pipeObj.updateMatrix()
+          pipeObj.updateMatrixWorld(true)
+          previewPipe.add(pipeObj)
         } else {
           // 调试信息：如果创建失败，输出错误
           console.warn('创建管道对象失败:', { type: item.type, params: paramsWithType })
@@ -2685,8 +2653,11 @@ const updateAssemblyView = (items, preserveCamera = false) => {
       const childId = child.userData && child.userData.assemblyItemId
       if (childId && !pipeItems.some(item => item.id === childId)) {
         // 清理资源
-        if (child.geometry) child.geometry.dispose()
-        if (child.material) child.material.dispose()
+        child.traverse(obj => {
+          if (obj.isMesh && obj.geometry) {
+            obj.geometry.dispose()
+          }
+        })
         previewPipe.remove(child)
       }
     })
@@ -2857,26 +2828,18 @@ const handleLodModeChange = (event) => {
   if (auto) {
     scheduleProgressiveRefine()
   } else if (previewPipe) {
-    // 手动模式：所有管道设为指定细分数
     if (_refineRAF) { cancelAnimationFrame(_refineRAF); _refineRAF = null }
-    for (const child of previewPipe.children) {
-      const ud = child.userData
-      if (!ud._originalParams) continue
-      if (ud._lodSegments === segments) continue
-      const params = { ...ud._originalParams, segments }
-      const newGroup = createPipeObject(params, ud.assemblyItemId)
-      if (!newGroup) continue
-      const pos = child.position.clone()
-      const rot = child.rotation.clone()
-      while (child.children.length) { const c = child.children[0]; if (c.geometry) c.geometry.dispose(); child.remove(c) }
-      while (newGroup.children.length) { child.add(newGroup.children[0]) }
-      child.position.copy(pos)
-      child.rotation.copy(rot)
-      ud._lodSegments = segments
-      ud._targetSegments = segments
-      enableShadowsForObject(child)
-    }
-    freezePreviewPipeMatrices()
+    // 从现有管道提取数据，覆盖 segments，复用 updateAssemblyView 重建
+    const items = [...previewPipe.children]
+      .filter(c => c.userData._originalParams)
+      .map(c => ({
+        id: c.userData.assemblyItemId,
+        type: c.userData._originalParams.type,
+        params: { ...c.userData._originalParams, segments },
+        position: { x: c.position.x, y: c.position.y, z: c.position.z },
+        rotation: { x: c.rotation.x, y: c.rotation.y, z: c.rotation.z }
+      }))
+    updateAssemblyView(items, true, true)
   }
 }
 
@@ -3469,7 +3432,7 @@ const removeTransparentObjects = (object) => {
       if (material && material.transparent && material.opacity === 0) {
         object.remove(child)
         if (child.geometry) child.geometry.dispose()
-        if (child.material) child.material.dispose()
+        // shared material, do not dispose
         continue
       }
     }

@@ -756,10 +756,17 @@
       </div>
       <div class="controls">
         <button @click="resetCamera">重置相机</button>
+        <button @click="clearAllData" class="danger-btn">清除所有</button>
+        <button @click="showSettings = !showSettings">设置</button>
+      </div>
+      <div class="controls" v-if="showSettings" style="margin-top:4px;">
         <button @click="switchCamera">{{ cameraMode === 'perspective' ? '透视' : '正交' }}</button>
         <button @click="switchRendererType">{{ rendererType === 'webgl' ? 'WebGL' : 'WebGPU' }}</button>
         <button type="button" @click="toggleShadows">{{ shadowsEnabled ? '阴影：开' : '阴影：关' }}</button>
-        <button @click="clearAllData" class="danger-btn">清除所有</button>
+        <button @click="lodAutoMode = !lodAutoMode">{{ lodAutoMode ? '自动优化' : '手动优化' }}</button>
+        <template v-if="!lodAutoMode">
+          <input type="number" v-model.number="lodManualSegments" min="3" max="16" style="width:50px;" @change="applyManualLod" />
+        </template>
       </div>
     </div>
     <!-- 旋转参数面板 -->
@@ -1134,6 +1141,7 @@ const arrayLoadingText = ref('正在执行阵列...')
 const arrayLoadingProgress = ref(0)
 
 // LOD 自动/手动切换
+const showSettings = ref(false)
 const lodAutoMode = ref(true)
 const lodManualSegments = ref(8)
 const applyManualLod = () => {
