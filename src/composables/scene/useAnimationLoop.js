@@ -71,6 +71,26 @@ export function useAnimationLoop(ctx, deps) {
     return false
   }
 
+  const _updateClippingPlanes = () => {
+    const cam = ctx.camera
+    const ctrl = ctx.controls
+    if (!cam || !ctrl) return
+
+    const dist = cam.position.distanceTo(ctrl.target)
+
+    // near/far 比值控制在 ~100000 以内，保证深度缓冲精度
+    // near: 距离的百分之一，最小 0.01
+    // far:  确保覆盖网格范围（gridExtent ≈ dist×2），最小 10000
+    const near = Math.max(0.01, dist * 0.01)
+    const far = Math.max(10000, dist * 20)
+
+    if (Math.abs(cam.near - near) > 0.001 || Math.abs(cam.far - far) > 1) {
+      cam.near = near
+      cam.far = far
+      cam.updateProjectionMatrix()
+    }
+  }
+
   const animateLoop = () => {
     if (ctx.stats) {
       ctx.stats.begin()
@@ -91,7 +111,11 @@ export function useAnimationLoop(ctx, deps) {
 
     // Check if camera actually moved
     const camMoved = _cameraChanged()
-    if (camMoved) _renderNeeded = true
+    if (camMoved) {
+      _renderNeeded = true
+      // 动态调整 near/far，确保模型和地面始终可见
+      _updateClippingPlanes()
+    }
 
     // Damping countdown
     if (_dampingFramesLeft > 0) {

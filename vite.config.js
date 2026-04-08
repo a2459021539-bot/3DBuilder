@@ -6,6 +6,10 @@ import { viteSingleFile } from 'vite-plugin-singlefile'
 export default defineConfig({
   plugins: [vue(), viteSingleFile()],
   base: './', // 使用相对路径，确保打包后可以在任何位置打开
+  server: {
+    host: '0.0.0.0', // 允许局域网访问
+    port: 5173
+  },
   build: {
     outDir: 'dist',
     assetsDir: 'assets',
