@@ -20,8 +20,14 @@ import { createPipeMaterial, createEndCapMaterial } from './pipeCommon.js'
 
 // ── 常量 ──────────────────────────────────────────────────────
 const DEFAULT_COLOR = new THREE.Color(1, 1, 1)
-const HIGHLIGHT_COLOR = new THREE.Color(0.5, 2.5, 0.5)
 const INITIAL_CAPACITY = 64
+// 橙色高亮动画参数（instanceColor 与材质色相乘，需 HDR 补偿蓝色基底）
+// 材质色 ≈ (0.29, 0.62, 1.0)，乘后效果：
+//   BASE: (0.29×3.5, 0.62×0.7, 1.0×0.0) ≈ (1.0, 0.43, 0.0) → 橙色
+//   PEAK: (0.29×6.0, 0.62×1.8, 1.0×0.05) ≈ (1.74, 1.12, 0.05) → 亮橙
+const HL_BASE = new THREE.Color(3.5, 0.7, 0.0)
+const HL_PEAK = new THREE.Color(6.0, 1.8, 0.05)
+const _hlAnimColor = new THREE.Color()
 
 const _tmpMatrix = new THREE.Matrix4()
 const _tmpPosition = new THREE.Vector3()
@@ -163,12 +169,21 @@ class FingerprintBucket {
     if (newMesh.instanceColor) newMesh.instanceColor.needsUpdate = true
   }
 
-  /** 计算实例矩阵：itemPosition + itemRotation + templateGroupQuaternion */
-  _composeMatrix(position, rotation) {
-    // 先应用模板组的旋转（如直管的 rotation.x=π/2），再应用零件自身旋转
-    _tmpEuler.set(rotation.x || 0, rotation.y || 0, rotation.z || 0)
-    _tmpQuaternion.setFromEuler(_tmpEuler)
-    _tmpQuaternion.multiply(this.templateGroupQuaternion)
+  /**
+   * 计算实例矩阵
+   * @param {boolean} hasExplicitRotation - rotation 是否由用户/持久化提供
+   *   true  → rotation 已包含模板旋转（直接使用）
+   *   false → 新建零件，用模板旋转作为默认值
+   */
+  _composeMatrix(position, rotation, hasExplicitRotation) {
+    if (hasExplicitRotation) {
+      // 用户/持久化的旋转已包含模板旋转，直接使用
+      _tmpEuler.set(rotation.x || 0, rotation.y || 0, rotation.z || 0)
+      _tmpQuaternion.setFromEuler(_tmpEuler)
+    } else {
+      // 新建零件：使用模板组的旋转（如直管 rotation.x=π/2）
+      _tmpQuaternion.copy(this.templateGroupQuaternion)
+    }
 
     _tmpPosition.set(position.x || 0, position.y || 0, position.z || 0)
     _tmpScale.set(1, 1, 1)
@@ -177,7 +192,7 @@ class FingerprintBucket {
   }
 
   /** 添加实例 */
-  addInstance(assemblyItemId, position, rotation) {
+  addInstance(assemblyItemId, position, rotation, hasExplicitRotation) {
     this._ensureCapacity(this.count + 1)
 
     const idx = this.count
@@ -185,7 +200,7 @@ class FingerprintBucket {
     this.indexToItem[idx] = assemblyItemId
     this.count++
 
-    this._composeMatrix(position, rotation)
+    this._composeMatrix(position, rotation, hasExplicitRotation)
     this._setAllMeshMatrix(idx, _tmpMatrix)
     this._setAllMeshColor(idx, DEFAULT_COLOR)
     this._updateCounts()
@@ -212,19 +227,17 @@ class FingerprintBucket {
     this._updateCounts()
   }
 
-  /** 更新实例变换 */
+  /** 更新实例变换（运行时更新，rotation 必然是完整的） */
   updateTransform(assemblyItemId, position, rotation) {
     const idx = this.itemToIndex.get(assemblyItemId)
     if (idx === undefined) return
-    this._composeMatrix(position, rotation)
+    this._composeMatrix(position, rotation, true)
     this._setAllMeshMatrix(idx, _tmpMatrix)
   }
 
-  /** 高亮 */
+  /** 高亮（由动画循环驱动颜色更新） */
   highlight(assemblyItemId) {
-    const idx = this.itemToIndex.get(assemblyItemId)
-    if (idx === undefined) return
-    this._setAllMeshColor(idx, HIGHLIGHT_COLOR)
+    // 颜色由 updateHighlightAnimation 统一刷新
   }
 
   /** 取消高亮 */
@@ -232,6 +245,14 @@ class FingerprintBucket {
     const idx = this.itemToIndex.get(assemblyItemId)
     if (idx === undefined) return
     this._setAllMeshColor(idx, DEFAULT_COLOR)
+  }
+
+  /** 批量更新高亮实例的颜色 */
+  applyHighlightColor(color, highlightedIds) {
+    for (const id of highlightedIds) {
+      const idx = this.itemToIndex.get(id)
+      if (idx !== undefined) this._setAllMeshColor(idx, color)
+    }
   }
 
   /** 隐藏实例（弹出时用缩放为 0 的矩阵） */
@@ -242,9 +263,12 @@ class FingerprintBucket {
     this._setAllMeshMatrix(idx, _tmpMatrix)
   }
 
-  /** 恢复实例可见 */
+  /** 恢复实例可见（pushBack 时调用，rotation 已包含模板旋转） */
   showInstance(assemblyItemId, position, rotation) {
-    this.updateTransform(assemblyItemId, position, rotation)
+    const idx = this.itemToIndex.get(assemblyItemId)
+    if (idx === undefined) return
+    this._composeMatrix(position, rotation, true)
+    this._setAllMeshMatrix(idx, _tmpMatrix)
   }
 
   /** 获取端面世界信息 */
@@ -370,6 +394,9 @@ const _itemTransforms = new Map()
 /** 弹出中的零件 → 临时 Group */
 const _poppedItems = new Map()
 
+/** 当前高亮中的 ID 集合（动画驱动） */
+const _highlightedSet = new Set()
+
 /** 几何模板缓存：fingerprint → templateGroup（避免重复 createPipeObject） */
 const _templateCache = new Map()
 
@@ -427,11 +454,27 @@ export function addItem(assemblyItemId, fingerprint, paramsWithType, position, r
     _buckets.set(fingerprint, bucket)
   }
 
-  bucket.addInstance(assemblyItemId, position || { x: 0, y: 0, z: 0 }, rotation || { x: 0, y: 0, z: 0 })
+  // rotation 是否由持久化/用户提供（已含模板旋转），或是新建零件（需要模板旋转）
+  const hasExplicitRotation = !!(rotation && (rotation.x || rotation.y || rotation.z))
+  bucket.addInstance(assemblyItemId,
+    position || { x: 0, y: 0, z: 0 },
+    rotation || { x: 0, y: 0, z: 0 },
+    hasExplicitRotation
+  )
   _itemRegistry.set(assemblyItemId, { bucket, fingerprint })
+
+  // 存储实际生效的旋转（新建零件→模板旋转，已有旋转→原值）
+  let effectiveRotation
+  if (hasExplicitRotation) {
+    effectiveRotation = { x: rotation.x || 0, y: rotation.y || 0, z: rotation.z || 0 }
+  } else {
+    // 从模板四元数转回欧拉角
+    _tmpEuler.setFromQuaternion(bucket.templateGroupQuaternion)
+    effectiveRotation = { x: _tmpEuler.x, y: _tmpEuler.y, z: _tmpEuler.z }
+  }
   _itemTransforms.set(assemblyItemId, {
     position: { x: position?.x || 0, y: position?.y || 0, z: position?.z || 0 },
-    rotation: { x: rotation?.x || 0, y: rotation?.y || 0, z: rotation?.z || 0 }
+    rotation: effectiveRotation
   })
 }
 
@@ -461,17 +504,51 @@ export function updateItemTransform(assemblyItemId, position, rotation) {
 }
 
 export function highlightItem(assemblyItemId) {
-  const reg = _itemRegistry.get(assemblyItemId)
-  if (reg) reg.bucket.highlight(assemblyItemId)
+  _highlightedSet.add(assemblyItemId)
 }
 
 export function unhighlightItem(assemblyItemId) {
+  _highlightedSet.delete(assemblyItemId)
   const reg = _itemRegistry.get(assemblyItemId)
   if (reg) reg.bucket.unhighlight(assemblyItemId)
 }
 
 export function unhighlightAll() {
-  _itemRegistry.forEach((reg, id) => reg.bucket.unhighlight(id))
+  for (const id of _highlightedSet) {
+    const reg = _itemRegistry.get(id)
+    if (reg) reg.bucket.unhighlight(id)
+  }
+  _highlightedSet.clear()
+}
+
+/**
+ * 每帧调用：更新高亮零件的橙色波浪闪烁动画
+ * @returns {boolean} 是否有活跃的高亮动画（需要持续渲染）
+ */
+export function updateHighlightAnimation() {
+  if (_highlightedSet.size === 0) return false
+
+  const t = performance.now() * 0.004   // 控制闪烁速度
+  const wave = 0.5 + 0.5 * Math.sin(t)  // 0 → 1 → 0 波浪
+
+  // 在 base 和 peak 之间插值
+  _hlAnimColor.r = HL_BASE.r + (HL_PEAK.r - HL_BASE.r) * wave
+  _hlAnimColor.g = HL_BASE.g + (HL_PEAK.g - HL_BASE.g) * wave
+  _hlAnimColor.b = HL_BASE.b + (HL_PEAK.b - HL_BASE.b) * wave
+
+  // 按桶批量更新（避免逐个 setColorAt 的重复 needsUpdate）
+  const bucketHighlights = new Map()
+  for (const id of _highlightedSet) {
+    const reg = _itemRegistry.get(id)
+    if (!reg) continue
+    if (!bucketHighlights.has(reg.bucket)) bucketHighlights.set(reg.bucket, [])
+    bucketHighlights.get(reg.bucket).push(id)
+  }
+  for (const [bucket, ids] of bucketHighlights) {
+    bucket.applyHighlightColor(_hlAnimColor, ids)
+  }
+
+  return true
 }
 
 /**

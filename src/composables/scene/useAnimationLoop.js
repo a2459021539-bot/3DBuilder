@@ -144,6 +144,11 @@ export function useAnimationLoop(ctx, deps) {
       _renderNeeded = true
     }
 
+    // 高亮波浪动画 — 有高亮时每帧渲染
+    if (InstancedManager.updateHighlightAnimation()) {
+      _renderNeeded = true
+    }
+
     // ---- SKIP RENDER if nothing changed ----
     // Stats info — update immediately when dirty regardless of render
     if (ctx.stats && ctx.stats._info && _statsInfoDirty) {
