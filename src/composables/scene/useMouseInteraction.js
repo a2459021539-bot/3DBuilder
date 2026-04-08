@@ -139,6 +139,17 @@ export function useMouseInteraction(ctx, deps) {
 
         if (ctx.isRotationMode) {
           deps.attachRotationGizmo(pipeGroup, assemblyItemId)
+          window.dispatchEvent(new CustomEvent('show-transform-panel', {
+            detail: {
+              type: 'rotate',
+              id: assemblyItemId,
+              rotation: {
+                x: pipeGroup.rotation.x,
+                y: pipeGroup.rotation.y,
+                z: pipeGroup.rotation.z
+              }
+            }
+          }))
         } else {
           deps.attachTranslateGizmo(pipeGroup, assemblyItemId)
           const t = InstancedManager.getItemTransform(assemblyItemId)
