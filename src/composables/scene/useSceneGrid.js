@@ -17,7 +17,20 @@ export const formatLength = (mm) => {
   return `${mm}mm`
 }
 
+// LRU texture cache — grid labels repeat heavily (e.g. "100mm" appears many times)
+const _textureCache = new Map()
+const _TEXTURE_CACHE_MAX = 128
+
 const createTextTexture = (text, fontSize = 32, color = 'rgba(255, 255, 255, 0.9)') => {
+  const key = `${text}|${fontSize}|${color}`
+  if (_textureCache.has(key)) {
+    // Move to end (most-recently-used)
+    const tex = _textureCache.get(key)
+    _textureCache.delete(key)
+    _textureCache.set(key, tex)
+    return tex
+  }
+
   const canvas = document.createElement('canvas')
   const context = canvas.getContext('2d')
   canvas.width = 256
@@ -29,6 +42,15 @@ const createTextTexture = (text, fontSize = 32, color = 'rgba(255, 255, 255, 0.9
   context.fillText(text, canvas.width / 2, canvas.height / 2)
   const texture = new THREE.CanvasTexture(canvas)
   texture.needsUpdate = true
+
+  // Evict oldest if over limit
+  if (_textureCache.size >= _TEXTURE_CACHE_MAX) {
+    const oldest = _textureCache.keys().next().value
+    const oldTex = _textureCache.get(oldest)
+    oldTex.dispose()
+    _textureCache.delete(oldest)
+  }
+  _textureCache.set(key, texture)
   return texture
 }
 
@@ -147,20 +169,23 @@ export function useSceneGrid(ctx) {
     const target = ctx.controls ? ctx.controls.target : new THREE.Vector3()
     const dist = ctx.camera.position.distanceTo(target)
     const step = niceStep(dist / 10)
-    const cx = Math.round(target.x / step) * step
-    const cz = Math.round(target.z / step) * step
+    const fineCx = Math.round(target.x / step) * step
+    const fineCz = Math.round(target.z / step) * step
+    const coarseStep = step * 5
+    const coarseCx = Math.round(target.x / coarseStep) * coarseStep
+    const coarseCz = Math.round(target.z / coarseStep) * coarseStep
 
     const isWebGPUBackend = ctx.renderer?.backend?.isWebGPUBackend === true
     if (isWebGPUBackend && gridGroup) {
       updateScaleBar()
       return
     }
-    if (!isWebGPUBackend && step === lastGridStep && Math.abs(cx - lastGridCenter.x) < step * 0.5 && Math.abs(cz - lastGridCenter.z) < step * 0.5) {
+    if (!isWebGPUBackend && step === lastGridStep && Math.abs(fineCx - lastGridCenter.x) < step * 0.5 && Math.abs(fineCz - lastGridCenter.z) < step * 0.5) {
       updateScaleBar()
       return
     }
     lastGridStep = step
-    lastGridCenter.set(cx, 0, cz)
+    lastGridCenter.set(fineCx, 0, fineCz)
 
     if (gridGroup) {
       scheduleGridGroupDisposal(gridGroup)
@@ -172,32 +197,32 @@ export function useSceneGrid(ctx) {
     const fineGrid = new THREE.GridHelper(gridExtent, gridExtent / step, 0x444444, 0x333333)
     fineGrid.material.opacity = 0.25
     fineGrid.material.transparent = true
-    fineGrid.position.set(cx, 0, cz)
+    fineGrid.position.set(fineCx, 0, fineCz)
     gridGroup.add(fineGrid)
 
-    const coarseStep = step * 5
     const coarseGrid = new THREE.GridHelper(gridExtent, gridExtent / coarseStep, 0x666666, 0x555555)
     coarseGrid.material.opacity = 0.5
     coarseGrid.material.transparent = true
-    coarseGrid.position.set(cx, 0, cz)
+    // 粗网格主刻度线需要始终锚定世界原点，否则白线会和真实刻度错位。
+    coarseGrid.position.set(coarseCx, 0, coarseCz)
     gridGroup.add(coarseGrid)
 
     const half = gridExtent / 2
     const labelScale = step * 2
     for (let i = -half; i <= half; i += coarseStep) {
-      const wx = cx + i
-      const wz = cz + i
+      const wx = coarseCx + i
+      const wz = coarseCz + i
       if (Math.abs(wx) > 0.001 || Math.abs(i) < 0.001) {
         const tex = createTextTexture(formatLength(Math.abs(wx)))
         const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, depthTest: false }))
-        s.position.set(wx, 0.1, cz - half - step)
+        s.position.set(wx, 0.1, coarseCz - half - step)
         s.scale.set(labelScale, labelScale * 0.25, 1)
         gridGroup.add(s)
       }
       if (Math.abs(wz) > 0.001 || Math.abs(i) < 0.001) {
         const tex = createTextTexture(formatLength(Math.abs(wz)))
         const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, depthTest: false }))
-        s.position.set(cx - half - step, 0.1, wz)
+        s.position.set(coarseCx - half - step, 0.1, wz)
         s.scale.set(labelScale, labelScale * 0.25, 1)
         gridGroup.add(s)
       }
@@ -207,16 +232,26 @@ export function useSceneGrid(ctx) {
     updateScaleBar()
   }
 
-  // --- Scale bar ---
+  // --- Scale bar (cached — avoid per-frame unproject) ---
+  const _sbP1 = new THREE.Vector3()
+  const _sbP2 = new THREE.Vector3()
+  let _lastCamMatrixSig = ''
+
   const updateScaleBar = () => {
     if (!ctx.camera || !ctx.renderer) return
     const h = ctx.renderer.domElement.clientHeight
     const w = ctx.renderer.domElement.clientWidth
     if (h === 0 || w === 0) return
 
-    const p1 = new THREE.Vector3(0, 0, 0.5).unproject(ctx.camera)
-    const p2 = new THREE.Vector3(1 / w, 0, 0.5).unproject(ctx.camera)
-    const worldPerPixel = p1.distanceTo(p2)
+    // Quick check: skip if camera projectionMatrix hasn't changed
+    const m = ctx.camera.projectionMatrix.elements
+    const sig = `${m[0].toFixed(4)}|${m[5].toFixed(4)}|${m[10].toFixed(4)}|${m[14].toFixed(4)}|${w}|${h}`
+    if (sig === _lastCamMatrixSig) return
+    _lastCamMatrixSig = sig
+
+    _sbP1.set(0, 0, 0.5).unproject(ctx.camera)
+    _sbP2.set(1 / w, 0, 0.5).unproject(ctx.camera)
+    const worldPerPixel = _sbP1.distanceTo(_sbP2)
     if (worldPerPixel === 0) return
 
     const barWorld = niceStep(worldPerPixel * 150)

@@ -6,7 +6,8 @@ import {
   setupEndFaceUserData,
   createEndCapForExtrudeFrame,
   createHitboxForExtrudeFrame,
-  getHitboxMaterial
+  getHitboxMaterial,
+  stripExtrudeCaps
 } from './pipeCommon.js'
 
 // 2D路径曲线类（组合直线和圆弧）
@@ -128,9 +129,11 @@ export class Path2DCurve extends THREE.Curve {
           }
         } else if (seg.type === 'arc') {
           const angle = seg.startAngle + (seg.endAngle - seg.startAngle) * clampedT
-          // 圆弧的切线方向
-          const tangentX = -Math.sin(angle) * (seg.clockwise ? -1 : 1)
-          const tangentY = Math.cos(angle) * (seg.clockwise ? -1 : 1)
+          // 切线方向必须和 getPoint() 的真实采样方向一致，否则 Frenet 标架会翻转，
+          // 进而导致沿路径拉伸的侧面绕序/法线方向错误。
+          const angleDirection = seg.endAngle >= seg.startAngle ? 1 : -1
+          const tangentX = -Math.sin(angle) * angleDirection
+          const tangentY = Math.cos(angle) * angleDirection
           return optionalTarget.set(tangentX, tangentY, 0).normalize()
         }
       }
@@ -140,6 +143,80 @@ export class Path2DCurve extends THREE.Curve {
     
     return optionalTarget.set(1, 0, 0)
   }
+}
+
+function ensureSketch2DSideOrientation(geometry, pathCurve, steps, innerRadius, outerRadius) {
+  const position = geometry.attributes.position
+  const normal = geometry.attributes.normal
+  const index = geometry.index
+  if (!position || !normal || !index) return
+
+  const midpointRadius = (innerRadius + outerRadius) / 2
+  const a = new THREE.Vector3()
+  const b = new THREE.Vector3()
+  const c = new THREE.Vector3()
+  const center = new THREE.Vector3()
+  const centerlinePoint = new THREE.Vector3()
+  const radial = new THREE.Vector3()
+  const edge1 = new THREE.Vector3()
+  const edge2 = new THREE.Vector3()
+  const faceNormal = new THREE.Vector3()
+
+  let outerDotSum = 0
+  let outerFaceCount = 0
+
+  for (let i = 0; i < index.count; i += 3) {
+    a.fromBufferAttribute(position, index.getX(i))
+    b.fromBufferAttribute(position, index.getX(i + 1))
+    c.fromBufferAttribute(position, index.getX(i + 2))
+    center.copy(a).add(b).add(c).multiplyScalar(1 / 3)
+
+    let bestDistanceSq = Infinity
+    for (let j = 0; j <= steps; j++) {
+      pathCurve.getPoint(j / steps, centerlinePoint)
+      const distanceSq = center.distanceToSquared(centerlinePoint)
+      if (distanceSq < bestDistanceSq) bestDistanceSq = distanceSq
+    }
+
+    const radiusFromCenterline = Math.sqrt(bestDistanceSq)
+    if (radiusFromCenterline <= midpointRadius) continue
+
+    edge1.copy(b).sub(a)
+    edge2.copy(c).sub(a)
+    faceNormal.crossVectors(edge1, edge2)
+    if (faceNormal.lengthSq() < 1e-8) continue
+    faceNormal.normalize()
+
+    let bestDistanceSqForRadial = Infinity
+    for (let j = 0; j <= steps; j++) {
+      pathCurve.getPoint(j / steps, centerlinePoint)
+      const distanceSq = center.distanceToSquared(centerlinePoint)
+      if (distanceSq < bestDistanceSqForRadial) {
+        bestDistanceSqForRadial = distanceSq
+        radial.copy(center).sub(centerlinePoint)
+      }
+    }
+    if (radial.lengthSq() < 1e-8) continue
+    radial.normalize()
+
+    outerDotSum += faceNormal.dot(radial)
+    outerFaceCount++
+  }
+
+  if (outerFaceCount === 0 || outerDotSum >= 0) return
+
+  for (let i = 0; i < index.count; i += 3) {
+    const ib = index.getX(i + 1)
+    const ic = index.getX(i + 2)
+    index.setX(i + 1, ic)
+    index.setX(i + 2, ib)
+  }
+  index.needsUpdate = true
+
+  for (let i = 0; i < normal.count; i++) {
+    normal.setXYZ(i, -normal.getX(i), -normal.getY(i), -normal.getZ(i))
+  }
+  normal.needsUpdate = true
 }
 
 // 创建2D草图管道
@@ -188,7 +265,9 @@ export function createSketch2DPipe(params, assemblyItemId = null) {
   
   // 创建几何体
   const geometry = new THREE.ExtrudeGeometry(shape, extrudeSettings)
-  
+  stripExtrudeCaps(geometry)
+  ensureSketch2DSideOrientation(geometry, pathCurve, steps, innerRadius, outerRadius)
+
   // 创建材质
   const pipeMaterial = createPipeMaterial()
   

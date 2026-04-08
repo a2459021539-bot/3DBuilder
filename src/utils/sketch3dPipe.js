@@ -4,7 +4,8 @@ import {
   createEndCapMaterial,
   createPipeSection,
   setupEndFaceUserData,
-  getHitboxMaterial
+  getHitboxMaterial,
+  stripExtrudeCaps
 } from './pipeCommon.js'
 
 // 3D路径曲线类
@@ -174,6 +175,7 @@ export function createSketch3DPipe(params, assemblyItemId = null) {
   const geometry = new THREE.ExtrudeGeometry(shape, {
     steps, bevelEnabled: false, extrudePath: pathCurve, curveSegments: radialSegments
   })
+  stripExtrudeCaps(geometry)
 
   const mesh = new THREE.Mesh(geometry, createPipeMaterial())
   mesh.userData.isOuterSurface = true

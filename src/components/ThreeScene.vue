@@ -73,7 +73,8 @@ import { useMouseInteraction } from '../composables/scene/useMouseInteraction.js
 import { useAssemblyView } from '../composables/scene/useAssemblyView.js'
 import { useLodSystem } from '../composables/scene/useLodSystem.js'
 import { useSceneExport } from '../composables/scene/useSceneExport.js'
-import { updateBatchedProxyMatrices } from '../utils/batchedProxy.js'
+import { updateBatchedProxyMatrices, buildBatchedProxy, setCapProxyVisible, setProxyFlatShading } from '../utils/batchedProxy.js'
+import { setFlatShading } from '../utils/pipeCommon.js'
 
 // Template refs
 const containerRef = ref(null)
@@ -105,10 +106,12 @@ const join = useJoinInteraction(ctx, {
 const pipePreviewDeps = {
   enableShadowsForObject: (obj) => enableShadowsForObject(ctx, obj),
   freezePreviewPipeMatrices: () => freezePreviewPipeMatrices(ctx),
-  requestShadowUpdate: () => requestShadowUpdate(ctx),
+  requestShadowUpdate: () => { requestShadowUpdate(ctx); animLoop.requestRender() },
   detachRotationGizmo: rotationGizmo.detachRotationGizmo,
   clearArraySelection: selection.clearArraySelection,
   handleResize: () => handleResize(),
+  markStatsDirty: () => animLoop.markStatsDirty(),
+  requestRender: () => animLoop.requestRender(),
   exitSketch3DMode: null, // set after sketch3D is created
   isSketch3DMode: null    // set after sketch3D is created
 }
@@ -135,12 +138,13 @@ const { isSketch3DMode, sketch3DDrawMode, sketch3DWorkingPlane,
 
 const mouse = useMouseInteraction(ctx, {
   attachRotationGizmo: rotationGizmo.attachRotationGizmo,
+  attachTranslateGizmo: rotationGizmo.attachTranslateGizmo,
   detachRotationGizmo: rotationGizmo.detachRotationGizmo,
   handleEndFaceClick: join.handleEndFaceClick,
   unfreezeObjectSubtree,
   freezePreviewPipeMatrices: () => freezePreviewPipeMatrices(ctx),
   findPipeGroupByAssemblyId: selection.findPipeGroupByAssemblyId,
-  requestShadowUpdate: () => requestShadowUpdate(ctx),
+  requestShadowUpdate: () => { requestShadowUpdate(ctx); animLoop.requestRender() },
   sketch3DRaycastToPlane: sketch3D.sketch3DRaycastToPlane,
   sketch3DAddLineSegment: sketch3D.sketch3DAddLineSegment,
   sketch3DAddArcSegment: sketch3D.sketch3DAddArcSegment,
@@ -171,7 +175,15 @@ const assemblyView = useAssemblyView(ctx, {
   sketchPathData: pipePreview.sketchPathData,
   sketch2DPipeParams: pipePreview.sketch2DPipeParams,
   initialSketchPathData: pipePreview.initialSketchPathData,
-  handleResize: () => handleResize()
+  handleResize: () => handleResize(),
+  // Notify caches on structural changes + trigger render
+  onStructuralChange: () => {
+    selection.invalidateCache()
+    if (animLoop) {
+      animLoop.markStatsDirty()
+      animLoop.requestRender()
+    }
+  }
 })
 
 // Wire circular dependency for LOD
@@ -202,19 +214,48 @@ const setupTransformControlEvents = () => {
     }
   })
 
+  // ---- Batch translate state ----
+  // When gizmo translates, ALL selected items move together.
+  // The gizmo is attached to the "anchor" pipe; others follow by delta.
+  let _batchMoveItems = []   // { id, group, startPos: {x,y,z} }
+  let _anchorStartPos = null // anchor pipe's start position
+
   ctx.transformControl.addEventListener('mouseDown', () => {
-    if (ctx.transformControl.object) {
+    const obj = ctx.transformControl.object
+    if (!obj) return
+    const mode = ctx.transformControl.mode
+    if (mode === 'rotate') {
       ctx.rotationStartSnapshot = {
-        x: ctx.transformControl.object.rotation.x,
-        y: ctx.transformControl.object.rotation.y,
-        z: ctx.transformControl.object.rotation.z
+        x: obj.rotation.x, y: obj.rotation.y, z: obj.rotation.z
       }
+    } else if (mode === 'translate') {
+      // Record start positions of ALL selected items
+      _anchorStartPos = { x: obj.position.x, y: obj.position.y, z: obj.position.z }
+      _batchMoveItems = []
+      for (const id of ctx.selectedAssemblyItemIds) {
+        if (id === ctx.rotatedAssemblyItemId) continue // anchor handled by gizmo
+        const group = selection.findPipeGroupByAssemblyId(id)
+        if (group) {
+          unfreezeObjectSubtree(group)
+          _batchMoveItems.push({
+            id,
+            group,
+            startPos: { x: group.position.x, y: group.position.y, z: group.position.z }
+          })
+        }
+      }
+      // Also store the anchor itself for history
+      ctx._translateStartPosition = { ..._anchorStartPos }
     }
   })
 
   ctx.transformControl.addEventListener('objectChange', () => {
     const obj = ctx.transformControl.object
-    if (obj && ctx.rotatedAssemblyItemId) {
+    if (!obj || !ctx.rotatedAssemblyItemId) return
+    const mode = ctx.transformControl.mode
+    animLoop.requestRender()
+
+    if (mode === 'rotate') {
       window.dispatchEvent(new CustomEvent('assembly-item-rotation-updated', {
         detail: {
           id: ctx.rotatedAssemblyItemId,
@@ -222,12 +263,48 @@ const setupTransformControlEvents = () => {
           isUserInput: false
         }
       }))
+    } else if (mode === 'translate') {
+      // Compute delta from anchor's start position
+      const dx = obj.position.x - _anchorStartPos.x
+      const dy = obj.position.y - _anchorStartPos.y
+      const dz = obj.position.z - _anchorStartPos.z
+
+      // Move all other selected items by the same delta
+      for (const item of _batchMoveItems) {
+        item.group.position.set(
+          item.startPos.x + dx,
+          item.startPos.y + dy,
+          item.startPos.z + dz
+        )
+        item.group.updateMatrix()
+        item.group.updateMatrixWorld(true)
+        // Sync data
+        window.dispatchEvent(new CustomEvent('assembly-item-position-updated', {
+          detail: {
+            id: item.id,
+            position: { x: item.group.position.x, y: item.group.position.y, z: item.group.position.z }
+          }
+        }))
+        updateBatchedProxyMatrices(item.id)
+      }
+
+      // Sync anchor
+      window.dispatchEvent(new CustomEvent('assembly-item-position-updated', {
+        detail: {
+          id: ctx.rotatedAssemblyItemId,
+          position: { x: obj.position.x, y: obj.position.y, z: obj.position.z }
+        }
+      }))
+      updateBatchedProxyMatrices(ctx.rotatedAssemblyItemId)
     }
   })
 
   ctx.transformControl.addEventListener('mouseUp', () => {
     const obj = ctx.transformControl.object
-    if (obj && ctx.rotatedAssemblyItemId && ctx.rotationStartSnapshot) {
+    if (!obj || !ctx.rotatedAssemblyItemId) return
+    const mode = ctx.transformControl.mode
+
+    if (mode === 'rotate' && ctx.rotationStartSnapshot) {
       window.dispatchEvent(new CustomEvent('assembly-item-rotation-ended', {
         detail: {
           id: ctx.rotatedAssemblyItemId,
@@ -236,8 +313,42 @@ const setupTransformControlEvents = () => {
           axis: ctx.rotationAxis
         }
       }))
+      ctx.rotationStartSnapshot = null
+    } else if (mode === 'translate' && ctx._translateStartPosition) {
+      if (_batchMoveItems.length > 0) {
+        // Batch move: emit one batch event
+        const items = [{
+          id: ctx.rotatedAssemblyItemId,
+          startPosition: { ...ctx._translateStartPosition },
+          endPosition: { x: obj.position.x, y: obj.position.y, z: obj.position.z }
+        }]
+        for (const item of _batchMoveItems) {
+          items.push({
+            id: item.id,
+            startPosition: { ...item.startPos },
+            endPosition: { x: item.group.position.x, y: item.group.position.y, z: item.group.position.z }
+          })
+        }
+        window.dispatchEvent(new CustomEvent('assembly-items-batch-drag-ended', {
+          detail: { items }
+        }))
+      } else {
+        // Single move
+        window.dispatchEvent(new CustomEvent('assembly-item-drag-ended', {
+          detail: {
+            id: ctx.rotatedAssemblyItemId,
+            startPosition: { ...ctx._translateStartPosition },
+            endPosition: { x: obj.position.x, y: obj.position.y, z: obj.position.z }
+          }
+        }))
+      }
+      ctx._translateStartPosition = null
+      _batchMoveItems = []
+      _anchorStartPos = null
+      // Freeze all
+      if (ctx.isAssemblyMode && ctx.previewPipe) freezePreviewPipeMatrices(ctx)
     }
-    ctx.rotationStartSnapshot = null
+    animLoop.requestRender()
   })
 }
 
@@ -260,7 +371,8 @@ const cam = useCameraRenderer(ctx, {
   setGridGroup: grid.setGridGroup,
   getLastGridStep: grid.getLastGridStep,
   setLastGridStep: grid.setLastGridStep,
-  getLastGridCenter: grid.getLastGridCenter
+  getLastGridCenter: grid.getLastGridCenter,
+  requestRender: () => animLoop.requestRender()
 })
 
 // ── Layout ──
@@ -279,6 +391,7 @@ const getAvailableWidth = () => {
 
 const handleResize = () => {
   if (!ctx.camera || !ctx.renderer) return
+  animLoop.requestRender()
   const availableWidth = getAvailableWidth()
   let width = pipePreview.isSplitView.value ? availableWidth / 2 : availableWidth
   const height = window.innerHeight
@@ -325,20 +438,49 @@ const handleResize = () => {
 
 // ── Event handlers ──
 
+const handleEndCapsSetting = (event) => {
+  const visible = event.detail?.visible !== false
+  // Toggle end cap visibility on individual meshes
+  if (ctx.previewPipe) {
+    ctx.previewPipe.traverse((child) => {
+      if (child.isMesh && child.userData && child.userData.isEndFace) {
+        child.visible = visible
+      }
+    })
+  }
+  // Toggle merged cap proxy
+  setCapProxyVisible(visible)
+  animLoop.requestRender()
+}
+
+const handleFlatShadingSetting = (event) => {
+  const enabled = event.detail?.enabled === true
+  setFlatShading(enabled)
+  setProxyFlatShading(enabled)
+  animLoop.requestRender()
+}
+
 const handleRotationModeToggle = (event) => {
   ctx.isRotationMode = event.detail.enabled
   if (!ctx.isRotationMode) rotationGizmo.detachRotationGizmo()
   else if (ctx.selectedPipeGroup && ctx.rotatedAssemblyItemId)
     rotationGizmo.attachRotationGizmo(ctx.selectedPipeGroup, ctx.rotatedAssemblyItemId)
+  animLoop.requestRender()
 }
 const handleRotationAxisChange = (event) => { ctx.rotationAxis = event.detail.axis }
-const handleMoveModeToggle = (event) => { ctx.isMoveMode = event.detail.enabled }
+const handleMoveModeToggle = (event) => {
+  ctx.isMoveMode = event.detail.enabled
+  // Detach gizmo when leaving move mode
+  if (!ctx.isMoveMode) rotationGizmo.detachRotationGizmo()
+}
 const handleArrayModeToggle = (event) => {
   ctx.isArrayMode = event.detail.enabled
   if (!ctx.isArrayMode) selection.clearArraySelection()
+  animLoop.requestRender()
 }
 const handleAssemblySelectionChanged = (event) => {
   selection.updateSelectionHighlight(event.detail.selectedIds || [])
+  animLoop.requestRender()
 }
 const handleMenuWidthChanged = (event) => {
   ctx.currentMenuWidth = event.detail.width
@@ -356,6 +498,7 @@ const handleAssemblyItemRotationUpdate = (event) => {
     pipeGroup.updateMatrixWorld(true)
     freezeObjectSubtree(pipeGroup)
     requestShadowUpdate(ctx)
+    animLoop.requestRender()
   }
 }
 
@@ -378,6 +521,7 @@ const handleApplyRotation = (event) => {
     window.dispatchEvent(new CustomEvent('assembly-item-rotation-ended', {
       detail: { id, startRotation, endRotation: { x: pipeGroup.rotation.x, y: pipeGroup.rotation.y, z: pipeGroup.rotation.z }, axis }
     }))
+    animLoop.requestRender()
   }
 }
 
@@ -439,7 +583,12 @@ const initThree = async () => {
   parentEl.appendChild(statsBall)
 
   // Camera
-  ctx.camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 10000)
+  ctx.camera = new THREE.PerspectiveCamera(
+    75,
+    window.innerWidth / window.innerHeight,
+    0.1,
+    10000
+  )
   ctx.camera.position.set(5, 5, 5)
 
   try { ctx.shadowsGloballyEnabled = localStorage.getItem('3dbuild.shadowsEnabled') !== '0' } catch { ctx.shadowsGloballyEnabled = true }
@@ -490,6 +639,10 @@ const initThree = async () => {
   ctx.controls.mouseButtons = { LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.PAN }
   ctx.controls.panSpeed = 0.8
 
+  // On-demand rendering: notify interaction when user operates controls
+  ctx.controls.addEventListener('start', () => animLoop.notifyInteraction())
+  ctx.controls.addEventListener('change', () => animLoop.requestRender())
+
   // TransformControls
   ctx.transformControl = new TransformControls(ctx.camera, ctx.renderer.domElement)
   ctx.transformControl.setMode('rotate')
@@ -520,6 +673,8 @@ onMounted(async () => {
   window.addEventListener('switch-camera', cam.switchCamera)
   window.addEventListener('switch-renderer', cam.switchRenderer)
   window.addEventListener('shadows-setting', cam.handleShadowsSetting)
+  window.addEventListener('endcaps-setting', handleEndCapsSetting)
+  window.addEventListener('flatshading-setting', handleFlatShadingSetting)
   window.addEventListener('update-pipe-preview', pipePreview.handlePipeParamsUpdate)
   window.addEventListener('view-part', pipePreview.handleViewPart)
   window.addEventListener('clear-pipe-preview', pipePreview.handleClearPreview)
@@ -569,6 +724,8 @@ onUnmounted(() => {
   window.removeEventListener('switch-camera', cam.switchCamera)
   window.removeEventListener('switch-renderer', cam.switchRenderer)
   window.removeEventListener('shadows-setting', cam.handleShadowsSetting)
+  window.removeEventListener('endcaps-setting', handleEndCapsSetting)
+  window.removeEventListener('flatshading-setting', handleFlatShadingSetting)
   window.removeEventListener('update-pipe-preview', pipePreview.handlePipeParamsUpdate)
   window.removeEventListener('view-part', pipePreview.handleViewPart)
   window.removeEventListener('clear-pipe-preview', pipePreview.handleClearPreview)

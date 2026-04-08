@@ -13,8 +13,8 @@ export function unfreezeObjectSubtree(obj) {
 
 export function freezeObjectSubtree(obj) {
   if (!obj) return
-  obj.traverse((o) => { o.matrixAutoUpdate = false })
   obj.updateMatrixWorld(true)
+  obj.traverse((o) => { o.matrixAutoUpdate = false })
 }
 
 // ── Helpers that operate on ctx ─────────────────────────────────
@@ -25,8 +25,8 @@ export function requestShadowUpdate(ctx) {
 
 export function freezePreviewPipeMatrices(ctx) {
   if (!ctx.previewPipe) return
-  ctx.previewPipe.traverse((o) => { o.matrixAutoUpdate = false })
   ctx.previewPipe.updateMatrixWorld(true)
+  ctx.previewPipe.traverse((o) => { o.matrixAutoUpdate = false })
 }
 
 export function enableShadowsForObject(ctx, object) {
@@ -246,6 +246,7 @@ export function useCameraRenderer(ctx, deps) {
       ctx.camera.position.set(0, 0, 5)
       ctx.controls.target.set(0, 0, 0)
       ctx.controls.update()
+      if (deps.requestRender) deps.requestRender()
     }
   }
 
@@ -267,6 +268,7 @@ export function useCameraRenderer(ctx, deps) {
       })
     }
     requestShadowUpdate(ctx)
+    if (deps.requestRender) deps.requestRender()
   }
 
   // ── handleShadowsSetting ────────────────────────────────────

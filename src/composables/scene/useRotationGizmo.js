@@ -1,16 +1,40 @@
 import { rotationSnapStep } from './useSceneContext.js'
 
+/**
+ * Unified TransformControls gizmo — supports both 'rotate' and 'translate' modes.
+ * In rotation mode: shows rotation rings.
+ * In move mode: shows XYZ translation arrows.
+ */
 export function useRotationGizmo(ctx, deps) {
+
   const attachRotationGizmo = (pipeGroup, assemblyItemId) => {
     ctx.selectedPipeGroup = pipeGroup
     ctx.rotatedObject = pipeGroup
     ctx.rotatedAssemblyItemId = assemblyItemId
     if (ctx.transformControl && pipeGroup) {
       deps.unfreezeObjectSubtree(pipeGroup)
+      ctx.transformControl.setMode('rotate')
+      ctx.transformControl.setRotationSnap(rotationSnapStep)
       ctx.transformControl.attach(pipeGroup)
       ctx.transformControl.visible = true
       ctx.transformControl.enabled = true
-      ctx.transformControl.setRotationSnap(rotationSnapStep)
+    }
+  }
+
+  /**
+   * Attach translate gizmo (XYZ arrows) for move mode.
+   */
+  const attachTranslateGizmo = (pipeGroup, assemblyItemId) => {
+    ctx.selectedPipeGroup = pipeGroup
+    ctx.rotatedObject = pipeGroup          // reuse same slot
+    ctx.rotatedAssemblyItemId = assemblyItemId
+    if (ctx.transformControl && pipeGroup) {
+      deps.unfreezeObjectSubtree(pipeGroup)
+      ctx.transformControl.setMode('translate')
+      ctx.transformControl.setTranslationSnap(null) // free movement
+      ctx.transformControl.attach(pipeGroup)
+      ctx.transformControl.visible = true
+      ctx.transformControl.enabled = true
     }
   }
 
@@ -32,5 +56,10 @@ export function useRotationGizmo(ctx, deps) {
     if (ctx.isAssemblyMode && ctx.previewPipe) deps.freezePreviewPipeMatrices()
   }
 
-  return { attachRotationGizmo, syncRotationGizmoToSelection, detachRotationGizmo }
+  return {
+    attachRotationGizmo,
+    attachTranslateGizmo,
+    syncRotationGizmoToSelection,
+    detachRotationGizmo
+  }
 }

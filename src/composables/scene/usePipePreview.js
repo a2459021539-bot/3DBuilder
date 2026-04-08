@@ -32,11 +32,11 @@ export function usePipePreview(ctx, deps) {
       deps.detachRotationGizmo()
       deps.clearArraySelection()
       clearBatchedProxy(ctx.scene)
-      // dispose geometries
+      // dispose geometries (skip shared geometry managed by geoCache)
       if (ctx.previewPipe.children) {
         ctx.previewPipe.children.forEach(child => {
           child.traverse(obj => {
-            if (obj.isMesh && obj.geometry) {
+            if (obj.isMesh && obj.geometry && !obj.userData._sharedGeometry) {
               obj.geometry.dispose()
             }
           })
@@ -45,6 +45,8 @@ export function usePipePreview(ctx, deps) {
       ctx.previewPipe = null
       ctx.isAssemblyMode = false
       deps.requestShadowUpdate()
+      deps.markStatsDirty()
+      deps.requestRender()
     }
   }
 
@@ -77,6 +79,8 @@ export function usePipePreview(ctx, deps) {
     ctx.scene.add(ctx.previewPipe)
     deps.freezePreviewPipeMatrices()
     deps.requestShadowUpdate()
+    deps.markStatsDirty()
+    deps.requestRender()
 
     // auto-adjust camera
     if (ctx.camera && ctx.controls) {
@@ -113,6 +117,8 @@ export function usePipePreview(ctx, deps) {
 
     ctx.previewPipe = result.pipeGroup
     ctx.scene.add(ctx.previewPipe)
+    deps.markStatsDirty()
+    deps.requestRender()
 
     // auto-adjust camera
     if (ctx.camera && ctx.controls) {

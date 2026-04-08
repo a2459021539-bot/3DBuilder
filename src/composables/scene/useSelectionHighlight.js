@@ -1,65 +1,67 @@
 import * as THREE from 'three'
-import { updateBatchedProxyMatrices } from '../../utils/batchedProxy.js'
+import {
+  highlightProxyItem,
+  unhighlightProxyItem,
+  unhighlightAllProxyItems,
+  updateBatchedProxyMatrices
+} from '../../utils/batchedProxy.js'
 
+/**
+ * Selection highlight via vertex colors in the merged proxy.
+ *
+ * Key optimization: highlighting does NOT pop items out of the proxy.
+ * Instead it tints vertices in-place → 0 extra draw calls, 0 extra meshes.
+ * Only drag/move/rotate pops items (via updateBatchedProxyMatrices).
+ */
 export function useSelectionHighlight(ctx) {
+  // O(1) lookup cache
+  const _pipeGroupCache = new Map()
+  // Currently highlighted IDs (for incremental diff)
+  const _highlightedIds = new Set()
+
   const findPipeGroupByAssemblyId = (assemblyId) => {
     if (!ctx.previewPipe || !assemblyId) return null
-    let target = null
-    ctx.previewPipe.children.forEach(child => {
+    const cached = _pipeGroupCache.get(assemblyId)
+    if (cached && cached.parent === ctx.previewPipe) return cached
+    const children = ctx.previewPipe.children
+    for (let i = 0, len = children.length; i < len; i++) {
+      const child = children[i]
       if (child.userData && child.userData.assemblyItemId === assemblyId) {
-        target = child
+        _pipeGroupCache.set(assemblyId, child)
+        return child
       }
-    })
-    return target
+    }
+    return null
   }
 
-  const highlightPipeGroupForSelection = (pipeGroup) => {
-    if (!pipeGroup) return
-    pipeGroup.traverse((child) => {
-      if (child instanceof THREE.Mesh && child.material) {
-        if (!ctx.selectionHighlightMap.has(child)) {
-          ctx.selectionHighlightMap.set(child, child.material)
-        }
-        const mat = child.material.clone()
-        if (mat.emissive) {
-          mat.emissive.set(0xffaa00)
-          mat.emissiveIntensity = 0.6
-        }
-        child.material = mat
-      }
-    })
-  }
+  const invalidateCache = () => { _pipeGroupCache.clear() }
 
-  const restorePipeGroupForSelection = (pipeGroup) => {
-    if (!pipeGroup) return
-    pipeGroup.traverse((child) => {
-      if (child instanceof THREE.Mesh && ctx.selectionHighlightMap.has(child)) {
-        child.material = ctx.selectionHighlightMap.get(child)
-        ctx.selectionHighlightMap.delete(child)
-      }
-    })
-  }
+  // Legacy API — still used by join interaction for end-face highlight (individual mesh)
+  const highlightPipeGroupForSelection = (pipeGroup) => {}
+  const restorePipeGroupForSelection = (pipeGroup) => {}
 
   const updateSelectionHighlight = (selectedIds) => {
     if (!ctx.previewPipe || !ctx.isAssemblyMode) return
-    // Clear all existing highlights
-    ctx.selectionHighlightMap.forEach((originalMaterial, child) => {
-      if (child instanceof THREE.Mesh) {
-        child.material = originalMaterial
+
+    const newSet = new Set(selectedIds || [])
+
+    // Incremental diff: unhighlight removed, highlight added
+    for (const id of _highlightedIds) {
+      if (!newSet.has(id)) {
+        unhighlightProxyItem(id)
       }
-    })
-    ctx.selectionHighlightMap.clear()
-    ctx.selectedAssemblyItemIds.clear()
-    if (selectedIds && selectedIds.length > 0) {
-      selectedIds.forEach(id => {
-        ctx.selectedAssemblyItemIds.add(id)
-        updateBatchedProxyMatrices(id)
-        const pipeGroup = findPipeGroupByAssemblyId(id)
-        if (pipeGroup) {
-          highlightPipeGroupForSelection(pipeGroup)
-        }
-      })
     }
+    for (const id of newSet) {
+      if (!_highlightedIds.has(id)) {
+        highlightProxyItem(id)
+      }
+    }
+
+    _highlightedIds.clear()
+    newSet.forEach(id => _highlightedIds.add(id))
+
+    ctx.selectedAssemblyItemIds.clear()
+    newSet.forEach(id => ctx.selectedAssemblyItemIds.add(id))
   }
 
   const clearArraySelection = () => {
@@ -71,6 +73,7 @@ export function useSelectionHighlight(ctx) {
 
   return {
     findPipeGroupByAssemblyId,
+    invalidateCache,
     highlightPipeGroupForSelection,
     restorePipeGroupForSelection,
     updateSelectionHighlight,

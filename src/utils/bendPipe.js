@@ -5,7 +5,8 @@ import {
   setupEndFaceUserData,
   createEndCapForExtrudeFrame,
   createHitboxForExtrudeFrame,
-  getHitboxMaterial
+  getHitboxMaterial,
+  stripExtrudeCaps
 } from './pipeCommon.js'
 
 // ArcCurve 类（弯管曲线）
@@ -58,7 +59,11 @@ export function createBendPipe(params, pipeMaterial, assemblyItemId) {
   
   // ExtrudeGeometry 生成
   const geometry = new THREE.ExtrudeGeometry(shape, extrudeSettings)
-  
+
+  // ExtrudeGeometry 默认生成前后端面（buildLidFaces），与手动创建的 endCap 重叠
+  // 导致 z-fighting 错位。剔除内建端面，只保留侧面（与直管/变径管的开放轮廓修复一致）
+  stripExtrudeCaps(geometry)
+
   // 创建 Mesh
   const mesh = new THREE.Mesh(geometry, pipeMaterial)
   

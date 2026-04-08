@@ -1,4 +1,105 @@
 import * as THREE from 'three'
+import { mergeVertices } from 'three/examples/jsm/utils/BufferGeometryUtils.js'
+
+/**
+ * 剔除 ExtrudeGeometry 内建的端面三角形。
+ * ExtrudeGeometry.buildLidFaces() 始终生成前后端面（group 0），
+ * 与手动创建的 endCap mesh 重叠导致 z-fighting。
+ * 调用后只保留侧面（group 1）。
+ */
+export function stripExtrudeCaps(geometry) {
+  const groups = geometry.groups
+  if (groups.length < 2) return
+
+  // group[0] = caps (buildLidFaces), group[1] = sides (buildSideFaces)
+  const sideGroup = groups[1]
+  const sideStart = sideGroup.start
+  const sideCount = sideGroup.count
+
+  if (geometry.index) {
+    // 索引几何体：截取侧面部分的索引
+    const arr = geometry.index.array
+    const newIndices = arr.slice(sideStart, sideStart + sideCount)
+    geometry.setIndex(new THREE.BufferAttribute(newIndices, 1))
+  } else {
+    // 非索引几何体（ExtrudeGeometry 默认）：截取侧面部分的属性数据
+    const pos = geometry.attributes.position
+    const norm = geometry.attributes.normal
+    const uv = geometry.attributes.uv
+
+    geometry.setAttribute('position',
+      new THREE.BufferAttribute(pos.array.slice(sideStart * 3, (sideStart + sideCount) * 3), 3))
+    if (norm) {
+      geometry.setAttribute('normal',
+        new THREE.BufferAttribute(norm.array.slice(sideStart * 3, (sideStart + sideCount) * 3), 3))
+    }
+    if (uv) {
+      geometry.setAttribute('uv',
+        new THREE.BufferAttribute(uv.array.slice(sideStart * 2, (sideStart + sideCount) * 2), 2))
+    }
+  }
+  geometry.clearGroups()
+
+  // 用 ExtrudeGeometry 原始法线方向做平滑（不用 computeVertexNormals，它会因绕序差异翻转法线）
+  // 1. 按位置分组，平均原始法线 → 保持正确方向的平滑法线
+  // 2. mergeVertices 合并重复顶点 → 索引几何体
+  const pos = geometry.attributes.position
+  const norm = geometry.attributes.normal
+  if (pos && norm) {
+    const tolerance = 1e-4
+    const invT = 1 / tolerance
+    const groups = new Map()
+    for (let i = 0; i < pos.count; i++) {
+      const key = `${Math.round(pos.getX(i) * invT)},${Math.round(pos.getY(i) * invT)},${Math.round(pos.getZ(i) * invT)}`
+      if (!groups.has(key)) groups.set(key, [])
+      groups.get(key).push(i)
+    }
+    for (const indices of groups.values()) {
+      let nx = 0, ny = 0, nz = 0
+      for (const i of indices) {
+        nx += norm.getX(i); ny += norm.getY(i); nz += norm.getZ(i)
+      }
+      const len = Math.sqrt(nx * nx + ny * ny + nz * nz)
+      if (len > 0) { nx /= len; ny /= len; nz /= len }
+      for (const i of indices) norm.setXYZ(i, nx, ny, nz)
+    }
+    norm.needsUpdate = true
+  }
+
+  const merged = mergeVertices(geometry)
+  geometry.index = merged.index
+  geometry.attributes.position = merged.attributes.position
+  geometry.attributes.normal = merged.attributes.normal
+  if (merged.attributes.uv) geometry.attributes.uv = merged.attributes.uv
+}
+
+/**
+ * 剔除 LatheGeometry 中外壁→内壁的连接面行。
+ * 开放轮廓 [外壁..., 内壁...] 在外壁末端和内壁起始之间会产生一行
+ * 连接三角面，与手动 endCap mesh 重叠导致 z-fighting。
+ *
+ * @param {BufferGeometry} geometry - LatheGeometry 实例
+ * @param {number} profileLen - 轮廓点数 (points.length)
+ * @param {number} connectJ  - 连接面所在的行索引
+ * @param {number} segments  - LatheGeometry 的圆周分段数
+ */
+export function stripLatheConnectingFace(geometry, profileLen, connectJ, segments) {
+  const idx = geometry.index
+  if (!idx) return
+  const arr = idx.array
+  const rowsPerSeg = profileLen - 1
+  const newIndices = []
+  for (let i = 0; i < segments; i++) {
+    for (let j = 0; j < rowsPerSeg; j++) {
+      if (j === connectJ) continue
+      const offset = (i * rowsPerSeg + j) * 6
+      for (let k = 0; k < 6; k++) {
+        newIndices.push(arr[offset + k])
+      }
+    }
+  }
+  geometry.setIndex(newIndices)
+}
 
 // 创建正多边形环形截面 Shape（segments=3 → 三角形，segments=4 → 正方形...）
 export function createPipeSection(outerRadius, innerRadius, segments) {
@@ -23,13 +124,18 @@ let _sharedPipeMaterial = null
 let _sharedEndCapMaterial = null
 let _sharedHitboxMaterial = null
 
+function _readFlatShading() {
+  try { return localStorage.getItem('3dbuild.flatShading') === '1' } catch { return false }
+}
+
 // 创建管道材质
 export function createPipeMaterial() {
   if (!_sharedPipeMaterial) {
     _sharedPipeMaterial = new THREE.MeshStandardMaterial({
       color: 0x4a9eff,
       metalness: 0.3,
-      roughness: 0.7
+      roughness: 0.7,
+      flatShading: _readFlatShading()
     })
   }
   return _sharedPipeMaterial
@@ -41,10 +147,24 @@ export function createEndCapMaterial() {
     _sharedEndCapMaterial = new THREE.MeshStandardMaterial({
       color: 0xffaa00, // 橙色，便于识别
       metalness: 0.3,
-      roughness: 0.7
+      roughness: 0.7,
+      side: THREE.DoubleSide,
+      flatShading: _readFlatShading()
     })
   }
   return _sharedEndCapMaterial
+}
+
+/** 运行时切换所有管道材质的着色方式 */
+export function setFlatShading(enabled) {
+  if (_sharedPipeMaterial) {
+    _sharedPipeMaterial.flatShading = enabled
+    _sharedPipeMaterial.needsUpdate = true
+  }
+  if (_sharedEndCapMaterial) {
+    _sharedEndCapMaterial.flatShading = enabled
+    _sharedEndCapMaterial.needsUpdate = true
+  }
 }
 
 // 获取统一的碰撞体材质
@@ -58,69 +178,6 @@ export function getHitboxMaterial() {
     })
   }
   return _sharedHitboxMaterial
-}
-
-// 创建直管端面几何体
-export function createEndCapGeometry(innerRadius, outerRadius, y, isTop, radialSegments) {
-  const geometry = new THREE.BufferGeometry()
-  const vertices = []
-  const normals = []
-  const indices = []
-  const uvs = []
-  const normalY = isTop ? 1 : -1
-  
-  for (let i = 0; i <= radialSegments; i++) {
-    const theta = (i / radialSegments) * Math.PI * 2
-    const sin = Math.sin(theta)
-    const cos = Math.cos(theta)
-    
-    vertices.push(outerRadius * sin, y, outerRadius * cos)
-    normals.push(0, normalY, 0)
-    uvs.push(0.5 + 0.5 * sin, 0.5 + 0.5 * cos)
-    
-    vertices.push(innerRadius * sin, y, innerRadius * cos)
-    normals.push(0, normalY, 0)
-    uvs.push(0.5 + 0.5 * (innerRadius/outerRadius) * sin, 0.5 + 0.5 * (innerRadius/outerRadius) * cos)
-  }
-  
-  for (let i = 0; i < radialSegments; i++) {
-    const outerCurrent = i * 2
-    const innerCurrent = i * 2 + 1
-    const outerNext = (i + 1) * 2
-    const innerNext = (i + 1) * 2 + 1
-    
-    if (isTop) {
-      indices.push(outerCurrent, innerCurrent, outerNext)
-      indices.push(innerCurrent, innerNext, outerNext)
-    } else {
-      indices.push(outerNext, innerCurrent, outerCurrent)
-      indices.push(outerNext, innerNext, innerCurrent)
-    }
-  }
-  
-  geometry.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3))
-  geometry.setAttribute('normal', new THREE.Float32BufferAttribute(normals, 3))
-  geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2))
-  geometry.setIndex(indices)
-  return geometry
-}
-
-// 创建端面辅助点击区域几何体（实心圆盘）
-export function createHitboxGeometry(radius, y, isTop, radialSegments) {
-  const geometry = new THREE.CircleGeometry(radius, radialSegments)
-  // CircleGeometry 默认在 XOY 平面，我们需要旋转到 XOZ 平面（因为 LatheGeometry 是绕 Y 轴）
-  geometry.rotateX(Math.PI / 2)
-  // 调整位置
-  geometry.translate(0, y, 0)
-  
-  // 如果是底部端面，法向量默认向下，如果是顶部，法向量默认向上
-  // CircleGeometry 默认法向量是 (0, 0, 1)（在 XOY 平面），旋转后变成 (0, -1, 0)
-  // isTop 为 true 时需要反转法向量，或者旋转 180 度
-  if (isTop) {
-    geometry.rotateX(Math.PI) // 翻转
-  }
-  
-  return geometry
 }
 
 // 设置端面用户数据的辅助函数

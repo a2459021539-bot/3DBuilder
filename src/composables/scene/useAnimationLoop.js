@@ -1,13 +1,75 @@
 import { getPerfDebugEnabled } from './useSceneContext.js'
 
 /**
- * Animation loop extracted from ThreeScene.vue.
+ * Animation loop with on-demand rendering.
+ *
+ * Key optimization: When the camera hasn't moved and nothing is dirty,
+ * we skip the expensive renderer.render() call entirely.
+ * OrbitControls damping is handled by continuing to render for a short
+ * window after user interaction stops.
  *
  * @param {object} ctx  - shared scene context (plain object)
  * @param {object} deps - external callbacks:
  *   { updateDynamicGrid, tickPendingGridDisposals, degradeLod }
  */
 export function useAnimationLoop(ctx, deps) {
+  // ---- Cached stats ----
+  let _cachedMeshes = 0
+  let _cachedTris = 0
+  let _statsInfoDirty = true
+
+  const markStatsDirty = () => { _statsInfoDirty = true }
+
+  const _recomputeStats = () => {
+    let meshes = 0; let tris = 0
+    ctx.scene.traverse((o) => {
+      if (o.isMesh && o.visible && o.userData.isOuterSurface) {
+        meshes++
+        const g = o.geometry
+        if (g) tris += g.index ? g.index.count / 3 : (g.attributes.position ? g.attributes.position.count / 3 : 0)
+      }
+    })
+    _cachedMeshes = meshes
+    _cachedTris = tris
+    _statsInfoDirty = false
+  }
+
+  // ---- On-demand rendering state ----
+  let _renderNeeded = true        // initial render
+  let _dampingFramesLeft = 0      // frames to keep rendering after interaction
+  const DAMPING_FRAMES = 30       // ~0.5s at 60fps for damping to settle
+
+  // Camera state tracking — detect if controls.update() actually changed anything
+  let _lastCamPosX = NaN
+  let _lastCamPosY = NaN
+  let _lastCamPosZ = NaN
+  let _lastCamQuatX = NaN
+  let _lastCamQuatY = NaN
+  let _lastCamQuatZ = NaN
+  let _lastCamQuatW = NaN
+
+  /** Mark that a render is needed (call from outside when state changes) */
+  const requestRender = () => {
+    _renderNeeded = true
+  }
+
+  /** Mark that interaction happened — extend damping window */
+  const notifyInteraction = () => {
+    _dampingFramesLeft = DAMPING_FRAMES
+    _renderNeeded = true
+  }
+
+  const _cameraChanged = () => {
+    const p = ctx.camera.position
+    const q = ctx.camera.quaternion
+    if (p.x !== _lastCamPosX || p.y !== _lastCamPosY || p.z !== _lastCamPosZ ||
+        q.x !== _lastCamQuatX || q.y !== _lastCamQuatY || q.z !== _lastCamQuatZ || q.w !== _lastCamQuatW) {
+      _lastCamPosX = p.x; _lastCamPosY = p.y; _lastCamPosZ = p.z
+      _lastCamQuatX = q.x; _lastCamQuatY = q.y; _lastCamQuatZ = q.z; _lastCamQuatW = q.w
+      return true
+    }
+    return false
+  }
 
   const animateLoop = () => {
     if (ctx.stats) {
@@ -18,27 +80,63 @@ export function useAnimationLoop(ctx, deps) {
 
     if (++ctx._perfDebugFrame % 120 === 0) ctx._perfDebugEnabled = getPerfDebugEnabled()
     const dbg = ctx._perfDebugEnabled
-    let t0 = 0; let t1 = 0; let t2 = 0; let t3 = 0; let t4 = 0
+    let t0 = 0, t1 = 0, t2 = 0, t3 = 0, t4 = 0
     if (dbg) t0 = performance.now()
 
+    // Update controls (handles damping inertia)
     if (ctx.controls) {
       ctx.controls.update()
     }
     if (dbg) t1 = performance.now()
 
+    // Check if camera actually moved
+    const camMoved = _cameraChanged()
+    if (camMoved) _renderNeeded = true
+
+    // Damping countdown
+    if (_dampingFramesLeft > 0) {
+      _dampingFramesLeft--
+      _renderNeeded = true
+    }
+
+    // Shadow update
+    if (ctx._shadowUpdateRequested) {
+      _renderNeeded = true
+    }
+
+    // ---- SKIP RENDER if nothing changed ----
+    // Stats info — update immediately when dirty regardless of render
+    if (ctx.stats && ctx.stats._info && _statsInfoDirty) {
+      _recomputeStats()
+      ctx.stats._info.textContent = `零件 ${_cachedMeshes}  面 ${Math.round(_cachedTris)}`
+    }
+
+    if (!_renderNeeded) {
+      deps.tickPendingGridDisposals()
+      if (ctx.stats) {
+        ctx.stats.end()
+        if (ctx.stats._ms) ctx.stats._ms.end()
+        if (ctx.stats._mb) ctx.stats._mb.end()
+      }
+      return
+    }
+
+    _renderNeeded = false
+
+    // Grid update (only when rendering)
     deps.updateDynamicGrid()
     if (dbg) t2 = performance.now()
 
-    // Shadow update request
+    // Shadow
     if (ctx._shadowUpdateRequested && ctx.renderer.shadowMap && ctx.renderer.shadowMap.enabled) {
       ctx.renderer.shadowMap.needsUpdate = true
       ctx._shadowUpdateRequested = false
     }
 
+    // RENDER
     ctx.renderer.render(ctx.scene, ctx.camera)
     if (dbg) t3 = performance.now()
 
-    // Must dispose old grid meshes after render/submit to avoid WebGPU internal cache race
     deps.tickPendingGridDisposals()
     if (dbg) t4 = performance.now()
 
@@ -52,45 +150,21 @@ export function useAnimationLoop(ctx, deps) {
       if (ctx._lodAutoMode && ctx._fpsValue < 20 && ctx.previewPipe) deps.degradeLod()
     }
 
-    // Stats info panel
+    // Stats end
     if (ctx.stats) {
       ctx.stats.end()
       if (ctx.stats._ms) ctx.stats._ms.end()
       if (ctx.stats._mb) ctx.stats._mb.end()
-      if (ctx.stats._info && ++ctx._statsInfoTimer % 120 === 0) {
-        let meshes = 0; let tris = 0
-        ctx.scene.traverse((o) => {
-          if (o.isMesh && o.visible && o.userData.isOuterSurface) {
-            meshes++
-            const g = o.geometry
-            if (g) tris += g.index ? g.index.count / 3 : (g.attributes.position ? g.attributes.position.count / 3 : 0)
-          }
-        })
-        ctx.stats._info.textContent = `零件 ${meshes}  面 ${Math.round(tris)}`
-      }
     }
 
-    // Perf debug logging
+    // Debug log
     if (dbg && ctx._perfDebugFrame % ctx._perfLogEvery === 0) {
-      let meshAll = 0; let meshVisible = 0; let outer = 0; let castShadow = 0
-      ctx.scene.traverse((o) => {
-        if (!o.isMesh) return
-        meshAll++
-        if (o.visible) meshVisible++
-        if (o.userData?.isOuterSurface) outer++
-        if (o.castShadow) castShadow++
-      })
+      if (_statsInfoDirty) _recomputeStats()
       const r = ctx.renderer
-      const backend = r?.backend?.isWebGPUBackend ? 'webgpu' : 'webgl'
       const info = r?.info
-      const drawCallsFrame = info?.render?.drawCalls
-      const triFrame = info?.render?.triangles
-      const framePasses = info?.render?.frameCalls
-      const callsLifetime = info?.render?.calls
       console.log('[3DBuild perf]', {
         lodAuto: ctx._lodAutoMode,
-        refineScheduled: !!ctx._refineRAF,
-        backend,
+        backend: r?.backend?.isWebGPUBackend ? 'webgpu' : 'webgl',
         ms: {
           controls: +(t1 - t0).toFixed(2),
           grid: +(t2 - t1).toFixed(2),
@@ -98,15 +172,9 @@ export function useAnimationLoop(ctx, deps) {
           gridDispose: +(t4 - t3).toFixed(2),
           frame: +(t4 - t0).toFixed(2)
         },
-        meshes: { total: meshAll, visible: meshVisible, outerSurface: outer, castShadow },
-        rendererInfo: info?.render
-          ? {
-              drawCallsThisFrame: drawCallsFrame,
-              trianglesThisFrame: triFrame,
-              renderPassesThisFrame: framePasses,
-              renderCallsLifetime: callsLifetime
-            }
-          : '(无 info.render)'
+        meshes: _cachedMeshes,
+        tris: Math.round(_cachedTris),
+        rendererInfo: info?.render || '(无)'
       })
     }
   }
@@ -117,6 +185,9 @@ export function useAnimationLoop(ctx, deps) {
 
   return {
     animate,
-    animateLoop
+    animateLoop,
+    markStatsDirty,
+    requestRender,
+    notifyInteraction
   }
 }

@@ -120,13 +120,8 @@ export function useMouseInteraction(ctx, deps) {
       if (clickedObject.userData && clickedObject.userData.isOuterSurface) {
         const assemblyItemId = findAssemblyItemId(clickedObject)
         if (assemblyItemId) {
-          // Locate the pipe Group
-          let pipeGroup = null
-          ctx.previewPipe.children.forEach(child => {
-            if (child.userData && child.userData.assemblyItemId === assemblyItemId) {
-              pipeGroup = child
-            }
-          })
+          // Locate the pipe Group – delegate to deps for O(1) lookup
+          const pipeGroup = deps.findPipeGroupByAssemblyId(assemblyItemId)
 
           if (pipeGroup) {
             if (ctx.isRotationMode) {
@@ -138,58 +133,11 @@ export function useMouseInteraction(ctx, deps) {
               event.preventDefault()
               return
             } else if (ctx.isMoveMode) {
-              // Check for batch selection
-              const isMultiSelect = ctx.selectedAssemblyItemIds.size > 1 &&
-                                    ctx.selectedAssemblyItemIds.has(assemblyItemId)
-
-              if (isMultiSelect) {
-                // Batch move
-                ctx.draggedAssemblyItemIds = Array.from(ctx.selectedAssemblyItemIds)
-                ctx.draggedObjects = []
-                ctx.dragStartPositions = []
-
-                ctx.draggedAssemblyItemIds.forEach(id => {
-                  const group = deps.findPipeGroupByAssemblyId(id)
-                  if (group) {
-                    ctx.draggedObjects.push(group)
-                    ctx.dragStartPositions.push({
-                      x: group.position.x,
-                      y: group.position.y,
-                      z: group.position.z
-                    })
-                  }
-                })
-
-                ctx.draggedObject = pipeGroup
-                ctx.draggedAssemblyItemId = assemblyItemId
-              } else {
-                // Single move
-                ctx.draggedAssemblyItemIds = [assemblyItemId]
-                ctx.draggedObjects = [pipeGroup]
-                ctx.dragStartPositions = [{
-                  x: pipeGroup.position.x,
-                  y: pipeGroup.position.y,
-                  z: pipeGroup.position.z
-                }]
-                ctx.draggedObject = pipeGroup
-                ctx.draggedAssemblyItemId = assemblyItemId
-              }
-
-              // Save drag-start position (single-move compat)
-              ctx.dragStartPosition = {
-                x: pipeGroup.position.x,
-                y: pipeGroup.position.y,
-                z: pipeGroup.position.z
-              }
-
-              // Begin dragging
-              ctx.isDragging = true
-              ctx.hasMoved = false
-              if (ctx.draggedObjects.length > 0) {
-                ctx.draggedObjects.forEach(g => deps.unfreezeObjectSubtree(g))
-              } else {
-                deps.unfreezeObjectSubtree(pipeGroup)
-              }
+              // Move mode: attach translate gizmo (XYZ arrows)
+              window.dispatchEvent(new CustomEvent('assembly-item-selected', {
+                detail: { id: assemblyItemId }
+              }))
+              deps.attachTranslateGizmo(pipeGroup, assemblyItemId)
 
               // Show transform panel
               window.dispatchEvent(new CustomEvent('show-transform-panel', {
@@ -203,30 +151,8 @@ export function useMouseInteraction(ctx, deps) {
                   }
                 }
               }))
-
-              // Disable orbit controls
-              ctx.controls.enabled = false
-
-              // Create drag plane (camera-facing)
-              const cameraDirection = new THREE.Vector3()
-              ctx.camera.getWorldDirection(cameraDirection)
-              ctx.dragPlane = new THREE.Plane().setFromNormalAndCoplanarPoint(
-                cameraDirection,
-                pipeGroup.position
-              )
-
-              // Compute drag start point
-              const intersection = new THREE.Vector3()
-              raycaster.ray.intersectPlane(ctx.dragPlane, intersection)
-              if (!ctx.dragStartPoint) ctx.dragStartPoint = new THREE.Vector3()
-              ctx.dragStartPoint.copy(intersection)
-              if (!ctx.dragOffset) ctx.dragOffset = new THREE.Vector3()
-              ctx.dragOffset.copy(pipeGroup.position).sub(intersection)
-
-              // Cursor feedback
-              ctx.renderer.domElement.style.cursor = 'grabbing'
-
               event.preventDefault()
+              return
             }
           }
         }
@@ -300,53 +226,53 @@ export function useMouseInteraction(ctx, deps) {
 
     raycaster.setFromCamera(pointer, ctx.camera)
 
-    const newIntersection = new THREE.Vector3()
-    if (raycaster.ray.intersectPlane(ctx.dragPlane, newIntersection)) {
-      const delta = newIntersection.clone().sub(ctx.dragStartPoint)
+    if (raycaster.ray.intersectPlane(ctx.dragPlane, _tmpNewIntersection)) {
+      // Reuse pre-allocated vectors instead of clone()
+      _tmpDelta.copy(_tmpNewIntersection).sub(ctx.dragStartPoint)
 
       // Apply plane constraint
       if (ctx.movePlane === 'xy') {
-        delta.z = 0
+        _tmpDelta.z = 0
       } else if (ctx.movePlane === 'yz') {
-        delta.x = 0
+        _tmpDelta.x = 0
       } else if (ctx.movePlane === 'zx') {
-        delta.y = 0
+        _tmpDelta.y = 0
       }
 
       // Threshold check
-      if (delta.length() > 0.01) {
+      if (_tmpDelta.length() > 0.01) {
         ctx.hasMoved = true
       }
 
-      const newPosition = ctx.dragStartPoint.clone().add(delta).add(ctx.dragOffset)
+      _tmpNewPos.copy(ctx.dragStartPoint).add(_tmpDelta).add(ctx.dragOffset)
 
       // Batch move
       if (ctx.draggedObjects.length > 1 && ctx.dragStartPositions.length > 0) {
         const clickedIndex = ctx.draggedAssemblyItemIds.indexOf(ctx.draggedAssemblyItemId)
         if (clickedIndex >= 0 && ctx.dragStartPositions[clickedIndex]) {
           const clickedStartPos = ctx.dragStartPositions[clickedIndex]
-          const positionDelta = new THREE.Vector3(
-            newPosition.x - clickedStartPos.x,
-            newPosition.y - clickedStartPos.y,
-            newPosition.z - clickedStartPos.z
+          _tmpPosDelta.set(
+            _tmpNewPos.x - clickedStartPos.x,
+            _tmpNewPos.y - clickedStartPos.y,
+            _tmpNewPos.z - clickedStartPos.z
           )
 
           ctx.draggedObjects.forEach((obj, index) => {
             if (obj && ctx.dragStartPositions[index] && ctx.draggedAssemblyItemIds[index]) {
-              const newObjPosition = new THREE.Vector3(
-                ctx.dragStartPositions[index].x + positionDelta.x,
-                ctx.dragStartPositions[index].y + positionDelta.y,
-                ctx.dragStartPositions[index].z + positionDelta.z
+              _tmpObjPos.set(
+                ctx.dragStartPositions[index].x + _tmpPosDelta.x,
+                ctx.dragStartPositions[index].y + _tmpPosDelta.y,
+                ctx.dragStartPositions[index].z + _tmpPosDelta.z
               )
-              obj.position.copy(newObjPosition)
+              obj.position.copy(_tmpObjPos)
 
               window.dispatchEvent(new CustomEvent('assembly-item-position-updated', {
                 detail: {
                   id: ctx.draggedAssemblyItemIds[index],
                   position: {
-                    x: newObjPosition.x,
-                    y: newObjPosition.y,
-                    z: newObjPosition.z
+                    x: _tmpObjPos.x,
+                    y: _tmpObjPos.y,
+                    z: _tmpObjPos.z
                   }
                 }
               }))
@@ -356,7 +282,7 @@ export function useMouseInteraction(ctx, deps) {
       } else {
         // Single move
         if (ctx.draggedObject) {
-          ctx.draggedObject.position.copy(newPosition)
+          ctx.draggedObject.position.copy(_tmpNewPos)
           deps.requestShadowUpdate()
         }
 
@@ -364,9 +290,9 @@ export function useMouseInteraction(ctx, deps) {
           detail: {
             id: ctx.draggedAssemblyItemId,
             position: {
-              x: newPosition.x,
-              y: newPosition.y,
-              z: newPosition.z
+              x: _tmpNewPos.x,
+              y: _tmpNewPos.y,
+              z: _tmpNewPos.z
             }
           }
         }))

@@ -763,6 +763,8 @@
         <button @click="switchCamera">{{ cameraMode === 'perspective' ? '透视' : '正交' }}</button>
         <button @click="switchRendererType">{{ rendererType === 'webgl' ? 'WebGL' : 'WebGPU' }}</button>
         <button type="button" @click="toggleShadows">{{ shadowsEnabled ? '阴影：开' : '阴影：关' }}</button>
+        <button type="button" @click="toggleEndCaps">{{ endCapsVisible ? '端面：开' : '端面：关' }}</button>
+        <button type="button" @click="toggleFlatShading">{{ flatShading ? '着色：平面' : '着色：平滑' }}</button>
         <button @click="lodAutoMode = !lodAutoMode">{{ lodAutoMode ? '自动优化' : '手动优化' }}</button>
         <template v-if="!lodAutoMode">
           <input type="number" v-model.number="lodManualSegments" min="3" max="16" style="width:50px;" @change="applyManualLod" />
@@ -1275,11 +1277,7 @@ const switchMode = (mode) => {
     isJoinMode.value = false
     isMoveMode.value = false
 
-    // 阵列模式保留已选中的管道
-    if (mode !== 'array') {
-      selectedAssemblyItems.value.clear()
-      notifySelectionChanged()
-    }
+    // 切换模式时保留已选中的管道，不清空选择
     selectedAssemblyItemId.value = null
     resetJoinSelection()
 
@@ -1879,6 +1877,28 @@ const toggleShadows = () => {
     localStorage.setItem('3dbuild.shadowsEnabled', shadowsEnabled.value ? '1' : '0')
   } catch { /* noop */ }
   window.dispatchEvent(new CustomEvent('shadows-setting', { detail: { enabled: shadowsEnabled.value } }))
+}
+
+// 端面显示开关
+const readEndCapsVisible = () => {
+  try { return localStorage.getItem('3dbuild.endCapsVisible') !== '0' } catch { return true }
+}
+const endCapsVisible = ref(readEndCapsVisible())
+const toggleEndCaps = () => {
+  endCapsVisible.value = !endCapsVisible.value
+  try { localStorage.setItem('3dbuild.endCapsVisible', endCapsVisible.value ? '1' : '0') } catch {}
+  window.dispatchEvent(new CustomEvent('endcaps-setting', { detail: { visible: endCapsVisible.value } }))
+}
+
+// 着色方式开关
+const readFlatShading = () => {
+  try { return localStorage.getItem('3dbuild.flatShading') === '1' } catch { return false }
+}
+const flatShading = ref(readFlatShading())
+const toggleFlatShading = () => {
+  flatShading.value = !flatShading.value
+  try { localStorage.setItem('3dbuild.flatShading', flatShading.value ? '1' : '0') } catch {}
+  window.dispatchEvent(new CustomEvent('flatshading-setting', { detail: { enabled: flatShading.value } }))
 }
 
 // Excel 导入导出

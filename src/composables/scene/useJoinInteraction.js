@@ -2,38 +2,44 @@ import * as THREE from 'three'
 import { buildBatchedProxy, updateBatchedProxyMatrices } from '../../utils/batchedProxy.js'
 
 export function useJoinInteraction(ctx, deps) {
+  // --- Pre-allocated temp vectors for join calculations (avoid GC pressure) ---
+  const _jMovePos = new THREE.Vector3()
+  const _jMoveNormal = new THREE.Vector3()
+  const _jFixedPos = new THREE.Vector3()
+  const _jFixedNormal = new THREE.Vector3()
+  const _jOffset = new THREE.Vector3()
+  const _jTargetNormal = new THREE.Vector3()
+  const _jAlignQuat = new THREE.Quaternion()
+  const _jEndFaceLocal = new THREE.Vector3()
+  const _jNewEndFace = new THREE.Vector3()
+  const _jPosAdj = new THREE.Vector3()
+  const _jAddRotQuat = new THREE.Quaternion()
+  const _jRelPos = new THREE.Vector3()
+  const _jTmpPos = new THREE.Vector3()
+
+  // Pre-created highlight materials (2 instead of creating new each time)
+  const _hlMatFirst = new THREE.MeshStandardMaterial({
+    color: 0x00ff00, emissive: 0x00ff00, emissiveIntensity: 0.5,
+    metalness: 0.3, roughness: 0.7, side: THREE.DoubleSide, transparent: true, opacity: 0.8
+  })
+  const _hlMatSecond = new THREE.MeshStandardMaterial({
+    color: 0x0099ff, emissive: 0x0099ff, emissiveIntensity: 0.5,
+    metalness: 0.3, roughness: 0.7, side: THREE.DoubleSide, transparent: true, opacity: 0.8
+  })
+
   // --- Highlight materials ---
 
   const createHighlightMaterial = (isFirst = true) => {
-    // 第一个端面用绿色，第二个端面用蓝色
-    const color = isFirst ? 0x00ff00 : 0x0099ff
-    return new THREE.MeshStandardMaterial({
-      color: color,
-      emissive: color,
-      emissiveIntensity: 0.5,
-      metalness: 0.3,
-      roughness: 0.7,
-      side: THREE.DoubleSide,
-      transparent: true,
-      opacity: 0.8
-    })
+    // Return pre-created shared material instead of allocating new one each time
+    return isFirst ? _hlMatFirst : _hlMatSecond
   }
 
   const highlightEndFace = (endFaceObject, isFirst = true) => {
     if (!endFaceObject || !endFaceObject.material) return
+    if (ctx.highlightedEndFaces.has(endFaceObject)) return
 
-    // 如果已经高亮了，先恢复
-    if (ctx.highlightedEndFaces.has(endFaceObject)) {
-      return
-    }
-
-    // 保存原始材质
-    const originalMaterial = endFaceObject.material
-    ctx.highlightedEndFaces.set(endFaceObject, originalMaterial)
-
-    // 应用高亮材质
-    const highlightMaterial = createHighlightMaterial(isFirst)
-    endFaceObject.material = highlightMaterial
+    ctx.highlightedEndFaces.set(endFaceObject, endFaceObject.material)
+    endFaceObject.material = createHighlightMaterial(isFirst)
   }
 
   const restoreEndFace = (endFaceObject) => {
@@ -80,22 +86,26 @@ export function useJoinInteraction(ctx, deps) {
     return objects
   }
 
+  // Pre-allocated for getEndFaceWorldTransform — but returns new objects
+  // because callers store and compare the results
+  const _efLocalPos = new THREE.Vector3()
+  const _efLocalNor = new THREE.Vector3()
+
   const getEndFaceWorldTransform = (endFaceObject) => {
     const pipeGroup = endFaceObject.parent
     if (!pipeGroup) return null
 
-    // 端面应该有 userData 中的位置和法向量（直管和弯管都有）
     if (endFaceObject.userData.endFacePosition && endFaceObject.userData.endFaceNormal) {
-      const localPosition = endFaceObject.userData.endFacePosition.clone()
-      const localNormal = endFaceObject.userData.endFaceNormal.clone()
+      // Use temp vectors for computation, then copy into result
+      _efLocalPos.copy(endFaceObject.userData.endFacePosition)
+      _efLocalNor.copy(endFaceObject.userData.endFaceNormal)
 
-      // 转换到世界坐标系
-      const worldPosition = localPosition.applyMatrix4(pipeGroup.matrixWorld)
-      const worldNormal = localNormal.transformDirection(pipeGroup.matrixWorld).normalize()
+      const worldPosition = _efLocalPos.applyMatrix4(pipeGroup.matrixWorld)
+      const worldNormal = _efLocalNor.transformDirection(pipeGroup.matrixWorld).normalize()
 
       return {
-        position: worldPosition,
-        normal: worldNormal,
+        position: worldPosition.clone(), // caller stores this
+        normal: worldNormal.clone(),
         pipeGroup: pipeGroup,
         assemblyItemId: pipeGroup.userData.assemblyItemId,
         endFaceType: endFaceObject.userData.endFaceType
@@ -196,55 +206,48 @@ export function useJoinInteraction(ctx, deps) {
   // --- Join calculation core ---
 
   const performJoinCalculation = (pipeToMove, faceToMove, faceFixed, rotationAngle) => {
-    // 获取端面的世界坐标位置和法向量
-    const movePos = faceToMove.position.clone()
-    const moveNormal = faceToMove.normal.clone()
-    const fixedPos = faceFixed.position.clone()
-    const fixedNormal = faceFixed.normal.clone()
+    // Reuse pre-allocated vectors — zero GC pressure
+    _jMovePos.copy(faceToMove.position)
+    _jMoveNormal.copy(faceToMove.normal)
+    _jFixedPos.copy(faceFixed.position)
+    _jFixedNormal.copy(faceFixed.normal)
 
-    // 步骤1：移动管道，使移动端面的中心点与固定端面的中心点重合
-    const offset = fixedPos.clone().sub(movePos)
-    pipeToMove.position.add(offset)
+    // 步骤1：移动管道使端面中心重合
+    _jOffset.copy(_jFixedPos).sub(_jMovePos)
+    pipeToMove.position.add(_jOffset)
 
-    // 步骤2：计算旋转，使两个端面的法向量对齐（方向相反）
-    const targetNormal = fixedNormal.clone().multiplyScalar(-1)
-    const alignQuaternion = new THREE.Quaternion()
-    alignQuaternion.setFromUnitVectors(moveNormal.normalize(), targetNormal.normalize())
+    // 步骤2：法向量对齐（方向相反）
+    _jTargetNormal.copy(_jFixedNormal).multiplyScalar(-1)
+    _jAlignQuat.setFromUnitVectors(_jMoveNormal.normalize(), _jTargetNormal.normalize())
+    pipeToMove.quaternion.multiplyQuaternions(_jAlignQuat, pipeToMove.quaternion)
 
-    // 应用对齐旋转
-    pipeToMove.quaternion.multiplyQuaternions(alignQuaternion, pipeToMove.quaternion)
-
-    // 步骤3：重新计算端面位置（因为旋转后位置变了）
-    let endFaceLocalPos = new THREE.Vector3()
-    pipeToMove.children.forEach(child => {
+    // 步骤3：旋转后端面位置校正
+    _jEndFaceLocal.set(0, 0, 0)
+    const children = pipeToMove.children
+    for (let i = 0, len = children.length; i < len; i++) {
+      const child = children[i]
       if (child.userData && child.userData.isEndFace &&
           child.userData.endFaceType === faceToMove.endFaceType) {
-        endFaceLocalPos = child.userData.endFacePosition.clone()
+        _jEndFaceLocal.copy(child.userData.endFacePosition)
+        break
       }
-    })
+    }
 
-    // 计算旋转后端面的新世界位置
-    const newEndFaceLocalPos = endFaceLocalPos.clone().applyQuaternion(alignQuaternion)
-    const newEndFaceWorldPos = newEndFaceLocalPos.add(pipeToMove.position)
+    _jNewEndFace.copy(_jEndFaceLocal).applyQuaternion(_jAlignQuat).add(pipeToMove.position)
+    _jPosAdj.copy(_jFixedPos).sub(_jNewEndFace)
+    pipeToMove.position.add(_jPosAdj)
 
-    // 调整位置使端面中心点仍然重合
-    const positionAdjustment = fixedPos.clone().sub(newEndFaceWorldPos)
-    pipeToMove.position.add(positionAdjustment)
-
-    // 步骤4：应用额外的旋转角度（绕端面法向量旋转）
+    // 步骤4：额外旋转角度（绕端面法向量旋转）
     if (rotationAngle !== undefined && rotationAngle !== 0) {
-      const rotationAxis = targetNormal.normalize()
-      const additionalRotation = new THREE.Quaternion()
-      additionalRotation.setFromAxisAngle(rotationAxis, (rotationAngle * Math.PI) / 180)
+      _jTargetNormal.normalize()
+      _jAddRotQuat.setFromAxisAngle(_jTargetNormal, (rotationAngle * Math.PI) / 180)
 
-      // 绕端面中心点旋转
-      const endFaceCenter = fixedPos.clone()
-      const relativePos = pipeToMove.position.clone().sub(endFaceCenter)
-      const rotatedRelativePos = relativePos.applyQuaternion(additionalRotation)
-      pipeToMove.position.copy(endFaceCenter.clone().add(rotatedRelativePos))
+      _jRelPos.copy(pipeToMove.position).sub(_jFixedPos)
+      _jRelPos.applyQuaternion(_jAddRotQuat)
+      _jTmpPos.copy(_jFixedPos).add(_jRelPos)
+      pipeToMove.position.copy(_jTmpPos)
 
-      // 应用旋转到管道
-      pipeToMove.quaternion.multiplyQuaternions(additionalRotation, pipeToMove.quaternion)
+      pipeToMove.quaternion.multiplyQuaternions(_jAddRotQuat, pipeToMove.quaternion)
     }
   }
 
