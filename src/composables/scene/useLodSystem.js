@@ -1,7 +1,7 @@
 import * as THREE from 'three'
 import { createPipeObject } from '../../utils/pipeFactory.js'
 import { createPipeMaterial } from '../../utils/pipeCommon.js'
-import { updateBatchedProxyMatrices } from '../../utils/batchedProxy.js'
+// InstancedMesh 模式下不需要 proxy 更新
 
 export function useLodSystem(ctx, deps) {
   // Note: do NOT destructure updateAssemblyView — it may be null at init time
@@ -67,7 +67,7 @@ export function useLodSystem(ctx, deps) {
       if (toRefine) {
         refinePipeObject(toRefine)
         // 更新代理网格
-        updateBatchedProxyMatrices(toRefine.userData.assemblyItemId)
+        // InstancedMesh 模式下无需 proxy 更新
         ctx._refineRAF = requestAnimationFrame(step)
       } else {
         ctx._refineRAF = null

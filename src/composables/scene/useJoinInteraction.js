@@ -1,5 +1,5 @@
 import * as THREE from 'three'
-import { buildBatchedProxy, updateBatchedProxyMatrices } from '../../utils/batchedProxy.js'
+import * as InstancedManager from '../../utils/instancedAssemblyManager.js'
 
 export function useJoinInteraction(ctx, deps) {
   // --- Pre-allocated temp vectors for join calculations (avoid GC pressure) ---
@@ -308,7 +308,10 @@ export function useJoinInteraction(ctx, deps) {
         }
       }))
 
-      updateBatchedProxyMatrices(assemblyItemId)
+      InstancedManager.updateItemTransform(assemblyItemId,
+        { x: pipeToMove.position.x, y: pipeToMove.position.y, z: pipeToMove.position.z },
+        { x: euler.x, y: euler.y, z: euler.z }
+      )
     }
 
     // 重置选择并清除高亮
@@ -337,10 +340,6 @@ export function useJoinInteraction(ctx, deps) {
     }))
 
     pipeToMove.updateMatrixWorld(true)
-    if (ctx.isAssemblyMode && ctx.previewPipe) {
-      deps.freezePreviewPipeMatrices()
-      buildBatchedProxy(ctx.previewPipe, ctx.scene, ctx.shadowsGloballyEnabled)
-    }
   }
 
   // --- Join preview ---

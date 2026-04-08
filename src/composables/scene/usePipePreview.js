@@ -1,7 +1,7 @@
 import { ref } from 'vue'
 import { createPipeObject } from '../../utils/pipeFactory.js'
 import { createSketch2DPipe } from '../../utils/sketch2dPipe.js'
-import { clearBatchedProxy } from '../../utils/batchedProxy.js'
+import * as InstancedManager from '../../utils/instancedAssemblyManager.js'
 
 /**
  * Pipe preview composable – manages single-pipe preview, 2D sketch preview,
@@ -31,7 +31,7 @@ export function usePipePreview(ctx, deps) {
       ctx.scene.remove(ctx.previewPipe)
       deps.detachRotationGizmo()
       deps.clearArraySelection()
-      clearBatchedProxy(ctx.scene)
+      InstancedManager.clear()
       // dispose geometries (skip shared geometry managed by geoCache)
       if (ctx.previewPipe.children) {
         ctx.previewPipe.children.forEach(child => {

@@ -1,5 +1,5 @@
 import * as THREE from 'three'
-import { updateBatchedProxyMatrices } from '../../utils/batchedProxy.js'
+import * as InstancedManager from '../../utils/instancedAssemblyManager.js'
 
 /**
  * Mouse interaction composable for the 3D scene.
@@ -76,86 +76,82 @@ export function useMouseInteraction(ctx, deps) {
 
     raycaster.setFromCamera(pointer, ctx.camera)
 
-    // Intersect against pipe children
-    const intersects = raycaster.intersectObjects(ctx.previewPipe.children, true)
+    // InstancedMesh 射线检测 + 弹出的临时 Group 检测
+    const targets = InstancedManager.getAllInstancedMeshes()
+    // 也检测弹出中的临时 Group（正在拖拽/旋转的零件）
+    if (ctx.previewPipe) {
+      ctx.previewPipe.traverse(child => {
+        if (child.isMesh && child.layers.test(0)) targets.push(child)
+      })
+    }
+    const intersects = raycaster.intersectObjects(targets, false)
 
     if (intersects.length > 0) {
-      let clickedObject = null
-
-      // ---- Join mode: prioritise end-face clicks ----
+      // ---- Join mode: 优先端面 ----
       if (ctx.isJoinMode) {
-        for (let i = 0; i < Math.min(intersects.length, 3); i++) {
-          const obj = intersects[i].object
-          if (obj.userData && obj.userData.isEndFace) {
-            clickedObject = obj
-            deps.handleEndFaceClick(clickedObject, intersects[i].point)
+        for (let i = 0; i < Math.min(intersects.length, 5); i++) {
+          const hit = intersects[i]
+          const info = InstancedManager.getItemFromHit(hit)
+          if (info && (info.role === 'frontCap' || info.role === 'backCap')) {
+            const endFaceType = info.role === 'frontCap' ? 'front' : 'back'
+            deps.handleEndFaceClick(
+              { assemblyItemId: info.assemblyItemId, endFaceType },
+              hit.point
+            )
+            event.preventDefault()
+            return
+          }
+          // 也检查弹出的临时 mesh
+          const obj = hit.object
+          if (obj.userData?.isEndFace) {
+            deps.handleEndFaceClick(obj, hit.point)
             event.preventDefault()
             return
           }
         }
-        // Join mode but no end-face hit – do nothing
         return
       }
 
-      // Use first intersect if no end-face was found
-      if (!clickedObject) {
-        clickedObject = intersects[0].object
-      }
+      // 解析第一个 hit
+      const hit = intersects[0]
+      const info = InstancedManager.getItemFromHit(hit)
+      const assemblyItemId = info?.assemblyItemId || findAssemblyItemId(hit.object)
+      if (!assemblyItemId) return
 
       // ---- Array mode: toggle selection ----
       if (ctx.isArrayMode) {
-        if (clickedObject && clickedObject.userData && clickedObject.userData.isOuterSurface) {
-          const assemblyItemId = findAssemblyItemId(clickedObject)
-          if (assemblyItemId) {
-            window.dispatchEvent(new CustomEvent('toggle-assembly-item-selection', {
-              detail: { id: assemblyItemId }
-            }))
-          }
-        }
+        window.dispatchEvent(new CustomEvent('toggle-assembly-item-selection', {
+          detail: { id: assemblyItemId }
+        }))
         event.preventDefault()
         return
       }
 
-      // ---- Outer surface interaction (rotation / move) ----
-      if (clickedObject.userData && clickedObject.userData.isOuterSurface) {
-        const assemblyItemId = findAssemblyItemId(clickedObject)
-        if (assemblyItemId) {
-          // Locate the pipe Group – delegate to deps for O(1) lookup
-          const pipeGroup = deps.findPipeGroupByAssemblyId(assemblyItemId)
+      // ---- Rotation / Move mode ----
+      if (ctx.isRotationMode || ctx.isMoveMode) {
+        window.dispatchEvent(new CustomEvent('assembly-item-selected', {
+          detail: { id: assemblyItemId }
+        }))
 
-          if (pipeGroup) {
-            if (ctx.isRotationMode) {
-              // Rotation mode: select pipe and attach gizmo
-              window.dispatchEvent(new CustomEvent('assembly-item-selected', {
-                detail: { id: assemblyItemId }
-              }))
-              deps.attachRotationGizmo(pipeGroup, assemblyItemId)
-              event.preventDefault()
-              return
-            } else if (ctx.isMoveMode) {
-              // Move mode: attach translate gizmo (XYZ arrows)
-              window.dispatchEvent(new CustomEvent('assembly-item-selected', {
-                detail: { id: assemblyItemId }
-              }))
-              deps.attachTranslateGizmo(pipeGroup, assemblyItemId)
+        // 弹出临时 Group 用于交互
+        const pipeGroup = InstancedManager.popOutItem(assemblyItemId)
+        if (!pipeGroup) return
 
-              // Show transform panel
-              window.dispatchEvent(new CustomEvent('show-transform-panel', {
-                detail: {
-                  type: 'move',
-                  id: assemblyItemId,
-                  position: {
-                    x: pipeGroup.position.x,
-                    y: pipeGroup.position.y,
-                    z: pipeGroup.position.z
-                  }
-                }
-              }))
-              event.preventDefault()
-              return
+        if (ctx.isRotationMode) {
+          deps.attachRotationGizmo(pipeGroup, assemblyItemId)
+        } else {
+          deps.attachTranslateGizmo(pipeGroup, assemblyItemId)
+          const t = InstancedManager.getItemTransform(assemblyItemId)
+          window.dispatchEvent(new CustomEvent('show-transform-panel', {
+            detail: {
+              type: 'move',
+              id: assemblyItemId,
+              position: t?.position || { x: 0, y: 0, z: 0 }
             }
-          }
+          }))
         }
+        event.preventDefault()
+        return
       }
     }
   }
@@ -211,7 +207,7 @@ export function useMouseInteraction(ctx, deps) {
         }
       }))
 
-      updateBatchedProxyMatrices(ctx.rotatedAssemblyItemId)
+      // InstancedMesh 模式下不需要更新 proxy —— 弹出的零件直接作为独立 mesh 更新
       return
     }
 
@@ -297,7 +293,7 @@ export function useMouseInteraction(ctx, deps) {
           }
         }))
 
-        updateBatchedProxyMatrices(ctx.draggedAssemblyItemId)
+        // InstancedMesh: 弹出的零件已在场景中直接更新
       }
     }
   }

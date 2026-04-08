@@ -1,4 +1,5 @@
 import { getPerfDebugEnabled } from './useSceneContext.js'
+import * as InstancedManager from '../../utils/instancedAssemblyManager.js'
 
 /**
  * Animation loop with on-demand rendering.
@@ -22,13 +23,28 @@ export function useAnimationLoop(ctx, deps) {
 
   const _recomputeStats = () => {
     let meshes = 0; let tris = 0
-    ctx.scene.traverse((o) => {
-      if (o.isMesh && o.visible && o.userData.isOuterSurface) {
-        meshes++
-        const g = o.geometry
-        if (g) tris += g.index ? g.index.count / 3 : (g.attributes.position ? g.attributes.position.count / 3 : 0)
-      }
-    })
+
+    // InstancedMesh 统计：每个实例算一个零件
+    const instancedMeshes = InstancedManager.getAllInstancedMeshes()
+    for (const im of instancedMeshes) {
+      if (!im.visible || im.userData._role !== 'pipe') continue
+      meshes += im.count
+      const g = im.geometry
+      const trisPer = g ? (g.index ? g.index.count / 3 : (g.attributes.position ? g.attributes.position.count / 3 : 0)) : 0
+      tris += trisPer * im.count
+    }
+
+    // 非装配体模式：直接遍历（单零件预览等）
+    if (meshes === 0 && ctx.previewPipe) {
+      ctx.scene.traverse((o) => {
+        if (o.isMesh && o.visible && o.userData.isOuterSurface) {
+          meshes++
+          const g = o.geometry
+          if (g) tris += g.index ? g.index.count / 3 : (g.attributes.position ? g.attributes.position.count / 3 : 0)
+        }
+      })
+    }
+
     _cachedMeshes = meshes
     _cachedTris = tris
     _statsInfoDirty = false

@@ -73,8 +73,8 @@ import { useMouseInteraction } from '../composables/scene/useMouseInteraction.js
 import { useAssemblyView } from '../composables/scene/useAssemblyView.js'
 import { useLodSystem } from '../composables/scene/useLodSystem.js'
 import { useSceneExport } from '../composables/scene/useSceneExport.js'
-import { updateBatchedProxyMatrices, buildBatchedProxy, setCapProxyVisible, setProxyFlatShading } from '../utils/batchedProxy.js'
 import { setFlatShading } from '../utils/pipeCommon.js'
+import * as InstancedManager from '../utils/instancedAssemblyManager.js'
 
 // Template refs
 const containerRef = ref(null)
@@ -285,7 +285,7 @@ const setupTransformControlEvents = () => {
             position: { x: item.group.position.x, y: item.group.position.y, z: item.group.position.z }
           }
         }))
-        updateBatchedProxyMatrices(item.id)
+        // InstancedMesh: 弹出的零件直接作为独立 mesh 更新，无需 proxy 同步
       }
 
       // Sync anchor
@@ -295,7 +295,7 @@ const setupTransformControlEvents = () => {
           position: { x: obj.position.x, y: obj.position.y, z: obj.position.z }
         }
       }))
-      updateBatchedProxyMatrices(ctx.rotatedAssemblyItemId)
+      // InstancedMesh: 同上
     }
   })
 
@@ -314,6 +314,10 @@ const setupTransformControlEvents = () => {
         }
       }))
       ctx.rotationStartSnapshot = null
+      // 旋转结束，归还弹出的零件
+      if (ctx.isAssemblyMode && ctx.rotatedAssemblyItemId) {
+        InstancedManager.pushBackItem(ctx.rotatedAssemblyItemId)
+      }
     } else if (mode === 'translate' && ctx._translateStartPosition) {
       if (_batchMoveItems.length > 0) {
         // Batch move: emit one batch event
@@ -345,8 +349,10 @@ const setupTransformControlEvents = () => {
       ctx._translateStartPosition = null
       _batchMoveItems = []
       _anchorStartPos = null
-      // Freeze all
-      if (ctx.isAssemblyMode && ctx.previewPipe) freezePreviewPipeMatrices(ctx)
+      // 归还弹出的零件到 InstancedMesh
+      if (ctx.isAssemblyMode && ctx.rotatedAssemblyItemId) {
+        InstancedManager.pushBackItem(ctx.rotatedAssemblyItemId)
+      }
     }
     animLoop.requestRender()
   })
@@ -448,15 +454,15 @@ const handleEndCapsSetting = (event) => {
       }
     })
   }
-  // Toggle merged cap proxy
-  setCapProxyVisible(visible)
+  // Toggle instanced cap meshes
+  InstancedManager.setEndCapsVisible(visible)
   animLoop.requestRender()
 }
 
 const handleFlatShadingSetting = (event) => {
   const enabled = event.detail?.enabled === true
   setFlatShading(enabled)
-  setProxyFlatShading(enabled)
+  InstancedManager.setInstancedFlatShading(enabled)
   animLoop.requestRender()
 }
 
@@ -517,7 +523,11 @@ const handleApplyRotation = (event) => {
     window.dispatchEvent(new CustomEvent('assembly-item-rotation-updated', {
       detail: { id, rotation: { x: pipeGroup.rotation.x, y: pipeGroup.rotation.y, z: pipeGroup.rotation.z } }
     }))
-    updateBatchedProxyMatrices(id)
+    // 直接更新 InstancedMesh 实例变换
+    InstancedManager.updateItemTransform(id,
+      { x: pipeGroup.position.x, y: pipeGroup.position.y, z: pipeGroup.position.z },
+      { x: pipeGroup.rotation.x, y: pipeGroup.rotation.y, z: pipeGroup.rotation.z }
+    )
     window.dispatchEvent(new CustomEvent('assembly-item-rotation-ended', {
       detail: { id, startRotation, endRotation: { x: pipeGroup.rotation.x, y: pipeGroup.rotation.y, z: pipeGroup.rotation.z }, axis }
     }))

@@ -1,60 +1,33 @@
-import * as THREE from 'three'
-import {
-  highlightProxyItem,
-  unhighlightProxyItem,
-  unhighlightAllProxyItems,
-  updateBatchedProxyMatrices
-} from '../../utils/batchedProxy.js'
+import * as InstancedManager from '../../utils/instancedAssemblyManager.js'
 
 /**
- * Selection highlight via vertex colors in the merged proxy.
+ * Selection highlight via InstancedMesh instanceColor.
  *
- * Key optimization: highlighting does NOT pop items out of the proxy.
- * Instead it tints vertices in-place → 0 extra draw calls, 0 extra meshes.
- * Only drag/move/rotate pops items (via updateBatchedProxyMatrices).
+ * 0 extra draw calls — just tint the instance color in-place.
  */
 export function useSelectionHighlight(ctx) {
-  // O(1) lookup cache
-  const _pipeGroupCache = new Map()
-  // Currently highlighted IDs (for incremental diff)
   const _highlightedIds = new Set()
 
   const findPipeGroupByAssemblyId = (assemblyId) => {
-    if (!ctx.previewPipe || !assemblyId) return null
-    const cached = _pipeGroupCache.get(assemblyId)
-    if (cached && cached.parent === ctx.previewPipe) return cached
-    const children = ctx.previewPipe.children
-    for (let i = 0, len = children.length; i < len; i++) {
-      const child = children[i]
-      if (child.userData && child.userData.assemblyItemId === assemblyId) {
-        _pipeGroupCache.set(assemblyId, child)
-        return child
-      }
-    }
-    return null
+    // 优先返回弹出中的临时 Group（正在拖拽/旋转）
+    return InstancedManager.getPoppedGroup(assemblyId) || null
   }
 
-  const invalidateCache = () => { _pipeGroupCache.clear() }
+  const invalidateCache = () => {} // 不再需要缓存
 
-  // Legacy API — still used by join interaction for end-face highlight (individual mesh)
-  const highlightPipeGroupForSelection = (pipeGroup) => {}
-  const restorePipeGroupForSelection = (pipeGroup) => {}
+  const highlightPipeGroupForSelection = () => {}
+  const restorePipeGroupForSelection = () => {}
 
   const updateSelectionHighlight = (selectedIds) => {
-    if (!ctx.previewPipe || !ctx.isAssemblyMode) return
+    if (!ctx.isAssemblyMode) return
 
     const newSet = new Set(selectedIds || [])
 
-    // Incremental diff: unhighlight removed, highlight added
     for (const id of _highlightedIds) {
-      if (!newSet.has(id)) {
-        unhighlightProxyItem(id)
-      }
+      if (!newSet.has(id)) InstancedManager.unhighlightItem(id)
     }
     for (const id of newSet) {
-      if (!_highlightedIds.has(id)) {
-        highlightProxyItem(id)
-      }
+      if (!_highlightedIds.has(id)) InstancedManager.highlightItem(id)
     }
 
     _highlightedIds.clear()
@@ -71,12 +44,18 @@ export function useSelectionHighlight(ctx) {
     }))
   }
 
+  const clearAllHighlights = () => {
+    InstancedManager.unhighlightAll()
+    _highlightedIds.clear()
+  }
+
   return {
     findPipeGroupByAssemblyId,
     invalidateCache,
     highlightPipeGroupForSelection,
     restorePipeGroupForSelection,
     updateSelectionHighlight,
-    clearArraySelection
+    clearArraySelection,
+    clearAllHighlights
   }
 }
