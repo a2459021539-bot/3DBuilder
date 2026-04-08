@@ -78,10 +78,10 @@ export function useMouseInteraction(ctx, deps) {
 
     // InstancedMesh 射线检测 + 弹出的临时 Group 检测
     const targets = InstancedManager.getAllInstancedMeshes()
-    // 也检测弹出中的临时 Group（正在拖拽/旋转的零件）
-    if (ctx.previewPipe) {
-      ctx.previewPipe.traverse(child => {
-        if (child.isMesh && child.layers.test(0)) targets.push(child)
+    // 弹出中的临时 Group（拖拽/旋转/拼接中的零件）
+    for (const group of InstancedManager.getAllPoppedGroups()) {
+      group.traverse(child => {
+        if (child.isMesh) targets.push(child)
       })
     }
     const intersects = raycaster.intersectObjects(targets, false)

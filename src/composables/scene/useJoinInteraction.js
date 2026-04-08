@@ -92,11 +92,31 @@ export function useJoinInteraction(ctx, deps) {
   const _efLocalNor = new THREE.Vector3()
 
   const getEndFaceWorldTransform = (endFaceObject) => {
+    // ── InstancedMesh 模式：{ assemblyItemId, endFaceType } ──
+    if (endFaceObject.assemblyItemId && endFaceObject.endFaceType && !endFaceObject.isMesh) {
+      const info = InstancedManager.getEndFaceInfo(endFaceObject.assemblyItemId, endFaceObject.endFaceType)
+      if (!info) return null
+
+      // 拼接需要 pipeGroup 来移动零件 → 弹出临时 Group
+      let pipeGroup = InstancedManager.getPoppedGroup(endFaceObject.assemblyItemId)
+      if (!pipeGroup) {
+        pipeGroup = InstancedManager.popOutItem(endFaceObject.assemblyItemId)
+      }
+
+      return {
+        position: info.position.clone(),
+        normal: info.normal.clone(),
+        pipeGroup,
+        assemblyItemId: endFaceObject.assemblyItemId,
+        endFaceType: endFaceObject.endFaceType
+      }
+    }
+
+    // ── 传统 mesh 模式（弹出的临时 Group 子 mesh） ──
     const pipeGroup = endFaceObject.parent
     if (!pipeGroup) return null
 
     if (endFaceObject.userData.endFacePosition && endFaceObject.userData.endFaceNormal) {
-      // Use temp vectors for computation, then copy into result
       _efLocalPos.copy(endFaceObject.userData.endFacePosition)
       _efLocalNor.copy(endFaceObject.userData.endFaceNormal)
 
@@ -104,7 +124,7 @@ export function useJoinInteraction(ctx, deps) {
       const worldNormal = _efLocalNor.transformDirection(pipeGroup.matrixWorld).normalize()
 
       return {
-        position: worldPosition.clone(), // caller stores this
+        position: worldPosition.clone(),
         normal: worldNormal.clone(),
         pipeGroup: pipeGroup,
         assemblyItemId: pipeGroup.userData.assemblyItemId,
@@ -233,7 +253,7 @@ export function useJoinInteraction(ctx, deps) {
       }
     }
 
-    _jNewEndFace.copy(_jEndFaceLocal).applyQuaternion(_jAlignQuat).add(pipeToMove.position)
+    _jNewEndFace.copy(_jEndFaceLocal).applyQuaternion(pipeToMove.quaternion).add(pipeToMove.position)
     _jPosAdj.copy(_jFixedPos).sub(_jNewEndFace)
     pipeToMove.position.add(_jPosAdj)
 
@@ -340,6 +360,14 @@ export function useJoinInteraction(ctx, deps) {
     }))
 
     pipeToMove.updateMatrixWorld(true)
+
+    // 归还弹出的零件到 InstancedMesh
+    if (firstPipeGroup.userData.assemblyItemId) {
+      InstancedManager.pushBackItem(firstPipeGroup.userData.assemblyItemId)
+    }
+    if (secondPipeGroup.userData.assemblyItemId) {
+      InstancedManager.pushBackItem(secondPipeGroup.userData.assemblyItemId)
+    }
   }
 
   // --- Join preview ---
@@ -437,6 +465,26 @@ export function useJoinInteraction(ctx, deps) {
   // --- Helper: find end face object from previewPipe by assemblyItemId + endFaceType ---
 
   const _findEndFaceInPreview = (endFace) => {
+    // InstancedMesh 模式：弹出的临时 Group 不在 previewPipe 中，需要单独搜索
+    const poppedGroup = InstancedManager.getPoppedGroup(endFace.assemblyItemId)
+    if (poppedGroup) {
+      let found = null
+      poppedGroup.traverse((child) => {
+        if (child.userData &&
+            child.userData.isEndFace &&
+            child.userData.endFaceType === endFace.endFaceType &&
+            child.material &&
+            child.visible) {
+          const material = child.material
+          if (material.opacity !== 0 && material.opacity !== undefined) {
+            found = child
+          }
+        }
+      })
+      if (found) return found
+    }
+
+    // 传统模式：在 previewPipe 中搜索
     let found = null
     ctx.previewPipe.traverse((child) => {
       if (child.userData &&

@@ -314,9 +314,9 @@ class FingerprintBucket {
   // ── 内部工具 ──
 
   _setAllMeshMatrix(idx, matrix) {
-    if (this.pipeMesh) { this.pipeMesh.setMatrixAt(idx, matrix); this.pipeMesh.instanceMatrix.needsUpdate = true }
-    if (this.frontCapMesh) { this.frontCapMesh.setMatrixAt(idx, matrix); this.frontCapMesh.instanceMatrix.needsUpdate = true }
-    if (this.backCapMesh) { this.backCapMesh.setMatrixAt(idx, matrix); this.backCapMesh.instanceMatrix.needsUpdate = true }
+    if (this.pipeMesh) { this.pipeMesh.setMatrixAt(idx, matrix); this.pipeMesh.instanceMatrix.needsUpdate = true; this.pipeMesh.boundingSphere = null }
+    if (this.frontCapMesh) { this.frontCapMesh.setMatrixAt(idx, matrix); this.frontCapMesh.instanceMatrix.needsUpdate = true; this.frontCapMesh.boundingSphere = null }
+    if (this.backCapMesh) { this.backCapMesh.setMatrixAt(idx, matrix); this.backCapMesh.instanceMatrix.needsUpdate = true; this.backCapMesh.boundingSphere = null }
   }
 
   _setAllMeshColor(idx, color) {
@@ -351,9 +351,9 @@ class FingerprintBucket {
   }
 
   _updateCounts() {
-    if (this.pipeMesh) this.pipeMesh.count = this.count
-    if (this.frontCapMesh) this.frontCapMesh.count = this.count
-    if (this.backCapMesh) this.backCapMesh.count = this.count
+    if (this.pipeMesh) { this.pipeMesh.count = this.count; this.pipeMesh.boundingSphere = null }
+    if (this.frontCapMesh) { this.frontCapMesh.count = this.count; this.frontCapMesh.boundingSphere = null }
+    if (this.backCapMesh) { this.backCapMesh.count = this.count; this.backCapMesh.boundingSphere = null }
   }
 }
 
@@ -656,6 +656,11 @@ export function getEndFaceInfo(assemblyItemId, endFaceType) {
  */
 export function getPoppedGroup(assemblyItemId) {
   return _poppedItems.get(assemblyItemId) || null
+}
+
+/** 获取所有弹出中的 Group 列表 */
+export function getAllPoppedGroups() {
+  return Array.from(_poppedItems.values())
 }
 
 /**
