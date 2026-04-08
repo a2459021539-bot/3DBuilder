@@ -157,47 +157,56 @@ export function saveWorkspaceData(workspaceId, data) {
     historyItems = historyItems.slice(0, MAX_HISTORY_ITEMS)
   }
 
-  // ── 写入零件 ──
-  db.run('DELETE FROM parts WHERE workspace_id = ?', [workspaceId])
-  for (const p of partsItems) {
-    db.run('INSERT INTO parts VALUES (?,?,?,?,?,?)', [
-      p.id, workspaceId,
-      p.name || null,
-      p.type || 'straight',
-      p.params ? JSON.stringify(p.params) : null,
-      p.createTime || null
-    ])
-  }
+  // 整个写入包在一个事务里（否则每条 INSERT 都是独立事务，极慢）
+  db.run('BEGIN TRANSACTION')
+  try {
+    // ── 写入零件 ──
+    db.run('DELETE FROM parts WHERE workspace_id = ?', [workspaceId])
+    for (const p of partsItems) {
+      db.run('INSERT INTO parts VALUES (?,?,?,?,?,?)', [
+        p.id, workspaceId,
+        p.name || null,
+        p.type || 'straight',
+        p.params ? JSON.stringify(p.params) : null,
+        p.createTime || null
+      ])
+    }
 
-  // ── 写入装配体 ──
-  db.run('DELETE FROM assembly_items WHERE workspace_id = ?', [workspaceId])
-  for (const a of assemblyItems) {
-    // 提取纯参数（排除位置/旋转等顶层字段）
-    const params = { ...a.params || {} }
+    // ── 写入装配体 ──
+    db.run('DELETE FROM assembly_items WHERE workspace_id = ?', [workspaceId])
+    for (const a of assemblyItems) {
+      const params = { ...a.params || {} }
 
-    db.run('INSERT INTO assembly_items VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)', [
-      a.id, workspaceId,
-      a.originalPartId || null,
-      a.name || null,
-      a.type || 'straight',
-      JSON.stringify(params),
-      a.position?.x || 0, a.position?.y || 0, a.position?.z || 0,
-      a.rotation?.x || 0, a.rotation?.y || 0, a.rotation?.z || 0,
-      a.assemblyTime || null
-    ])
-  }
+      db.run('INSERT INTO assembly_items VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)', [
+        a.id, workspaceId,
+        a.originalPartId || null,
+        a.name || null,
+        a.type || 'straight',
+        JSON.stringify(params),
+        a.position?.x || 0, a.position?.y || 0, a.position?.z || 0,
+        a.rotation?.x || 0, a.rotation?.y || 0, a.rotation?.z || 0,
+        a.assemblyTime || null
+      ])
+    }
 
-  // ── 写入历史 ──
-  db.run('DELETE FROM history WHERE workspace_id = ?', [workspaceId])
-  for (let i = 0; i < historyItems.length; i++) {
-    const h = historyItems[i]
-    const { id, type, targetId, name, time, ...rest } = h
-    db.run('INSERT INTO history VALUES (?,?,?,?,?,?,?,?)', [
-      workspaceId, i,
-      id || null, type || 'unknown', targetId || null,
-      name || null, time || null,
-      Object.keys(rest).length > 0 ? JSON.stringify(rest) : null
-    ])
+    // ── 写入历史 ──
+    db.run('DELETE FROM history WHERE workspace_id = ?', [workspaceId])
+    for (let i = 0; i < historyItems.length; i++) {
+      const h = historyItems[i]
+      const { id, type, targetId, name, time, ...rest } = h
+      db.run('INSERT INTO history VALUES (?,?,?,?,?,?,?,?)', [
+        workspaceId, i,
+        id || null, type || 'unknown', targetId || null,
+        name || null, time || null,
+        Object.keys(rest).length > 0 ? JSON.stringify(rest) : null
+      ])
+    }
+
+    db.run('COMMIT')
+  } catch (e) {
+    db.run('ROLLBACK')
+    console.warn('保存工作空间数据失败:', e)
+    return
   }
 
   updateWorkspace(workspaceId, { updatedAt: new Date().toISOString() })

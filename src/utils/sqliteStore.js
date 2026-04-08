@@ -160,6 +160,7 @@ function migrateJsonToTables() {
     const res = db.exec('SELECT workspace_id, data_json FROM workspace_data')
     if (res.length === 0) return
 
+    db.run('BEGIN TRANSACTION')
     for (const row of res[0].values) {
       const wsId = row[0]
       const json = row[1]
@@ -223,7 +224,9 @@ function migrateJsonToTables() {
       // 清空旧 JSON 数据（迁移完成）
       db.run('DELETE FROM workspace_data WHERE workspace_id = ?', [wsId])
     }
+    db.run('COMMIT')
   } catch (e) {
+    try { db.run('ROLLBACK') } catch {}
     console.warn('迁移 workspace_data → 拆分表失败:', e)
   }
 }

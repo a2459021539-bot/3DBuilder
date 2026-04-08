@@ -6,7 +6,7 @@ import { flushDB } from '../../utils/sqliteStore.js'
 export function usePersistence(partsItems, assemblyItems, historyItems) {
   let suppressPersist = false
   let persistTimer = null
-  const PERSIST_DEBOUNCE_MS = 350
+  const PERSIST_DEBOUNCE_MS = 1500
   const saveToast = ref(false)
   let saveToastTimer = null
 
