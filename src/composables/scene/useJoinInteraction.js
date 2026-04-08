@@ -373,45 +373,12 @@ export function useJoinInteraction(ctx, deps) {
   // --- Join preview ---
 
   const previewJoin = (firstEndFace, secondEndFace, moveFirst, rotationAngle) => {
-    if (!firstEndFace || !secondEndFace || !ctx.previewPipe) return
+    if (!firstEndFace || !secondEndFace) return
 
-    // 查找第一个端面对象
-    let firstEndFaceObject = null
-    ctx.previewPipe.traverse((child) => {
-      if (child.userData &&
-          child.userData.isEndFace &&
-          child.userData.assemblyItemId === firstEndFace.assemblyItemId &&
-          child.userData.endFaceType === firstEndFace.endFaceType &&
-          child.material &&
-          child.visible) {
-        const material = child.material
-        if (material.opacity !== 0 && material.opacity !== undefined) {
-          firstEndFaceObject = child
-        }
-      }
-    })
+    const firstEndFaceObject = _findEndFaceInPreview(firstEndFace)
+    const secondEndFaceObject = _findEndFaceInPreview(secondEndFace)
+    if (!firstEndFaceObject || !secondEndFaceObject) return
 
-    // 查找第二个端面对象
-    let secondEndFaceObject = null
-    ctx.previewPipe.traverse((child) => {
-      if (child.userData &&
-          child.userData.isEndFace &&
-          child.userData.assemblyItemId === secondEndFace.assemblyItemId &&
-          child.userData.endFaceType === secondEndFace.endFaceType &&
-          child.material &&
-          child.visible) {
-        const material = child.material
-        if (material.opacity !== 0 && material.opacity !== undefined) {
-          secondEndFaceObject = child
-        }
-      }
-    })
-
-    if (!firstEndFaceObject || !secondEndFaceObject) {
-      return
-    }
-
-    // 获取完整的端面信息
     const firstEndFaceInfo = getEndFaceWorldTransform(firstEndFaceObject)
     const secondEndFaceInfo = getEndFaceWorldTransform(secondEndFaceObject)
 
@@ -441,23 +408,20 @@ export function useJoinInteraction(ctx, deps) {
 
     // 执行拼接计算（但不保存到数据）
     performJoinCalculation(pipeToMove, faceToMove, faceFixed, rotationAngle)
+    pipeToMove.updateMatrixWorld(true)
+    deps.requestRender()
   }
 
   const clearJoinPreview = () => {
-    if (ctx.joinPreviewOriginalState && ctx.previewPipe) {
-      // 查找对应的管道对象
-      let pipeToRestore = null
-      ctx.previewPipe.traverse((child) => {
-        if (child.userData && child.userData.assemblyItemId === ctx.joinPreviewOriginalState.pipeId) {
-          pipeToRestore = child
-        }
-      })
-
+    if (ctx.joinPreviewOriginalState) {
+      const pipeId = ctx.joinPreviewOriginalState.pipeId
+      // 查找弹出的临时 Group
+      const pipeToRestore = InstancedManager.getPoppedGroup(pipeId)
       if (pipeToRestore) {
         pipeToRestore.position.copy(ctx.joinPreviewOriginalState.position)
         pipeToRestore.quaternion.copy(ctx.joinPreviewOriginalState.quaternion)
+        deps.requestRender()
       }
-
       ctx.joinPreviewOriginalState = null
     }
   }
@@ -527,6 +491,7 @@ export function useJoinInteraction(ctx, deps) {
 
     // 执行拼接计算（角度为0）
     performJoinCalculation(pipeToMove, faceToMove, faceFixed, 0)
+    pipeToMove.updateMatrixWorld(true)
 
     // 保存拼接后的初始状态（角度为0的状态，用于角度预览）
     ctx.joinPreviewOriginalState = {
@@ -534,6 +499,7 @@ export function useJoinInteraction(ctx, deps) {
       position: pipeToMove.position.clone(),
       quaternion: pipeToMove.quaternion.clone()
     }
+    deps.requestRender()
   }
 
   const handlePreviewJoinAngle = (event) => {
@@ -563,6 +529,8 @@ export function useJoinInteraction(ctx, deps) {
 
     // 执行拼接计算（应用新的角度）
     performJoinCalculation(pipeToMove, faceToMove, faceFixed, rotationAngle)
+    pipeToMove.updateMatrixWorld(true)
+    deps.requestRender()
   }
 
   const handlePerformJoin = (event) => {

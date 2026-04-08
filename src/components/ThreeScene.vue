@@ -99,6 +99,7 @@ const rotationGizmo = useRotationGizmo(ctx, {
 const join = useJoinInteraction(ctx, {
   freezePreviewPipeMatrices: () => freezePreviewPipeMatrices(ctx),
   requestShadowUpdate: () => requestShadowUpdate(ctx),
+  requestRender: () => animLoop.requestRender(),
   findPipeGroupByAssemblyId: selection.findPipeGroupByAssemblyId
 })
 
@@ -234,7 +235,9 @@ const setupTransformControlEvents = () => {
       _batchMoveItems = []
       for (const id of ctx.selectedAssemblyItemIds) {
         if (id === ctx.rotatedAssemblyItemId) continue // anchor handled by gizmo
-        const group = selection.findPipeGroupByAssemblyId(id)
+        // 弹出其他选中的零件，使其可被移动
+        let group = InstancedManager.getPoppedGroup(id)
+        if (!group) group = InstancedManager.popOutItem(id)
         if (group) {
           unfreezeObjectSubtree(group)
           _batchMoveItems.push({
@@ -346,10 +349,13 @@ const setupTransformControlEvents = () => {
           }
         }))
       }
+      // 归还所有弹出的零件到 InstancedMesh
+      for (const item of _batchMoveItems) {
+        InstancedManager.pushBackItem(item.id)
+      }
       ctx._translateStartPosition = null
       _batchMoveItems = []
       _anchorStartPos = null
-      // 归还弹出的零件到 InstancedMesh
       if (ctx.isAssemblyMode && ctx.rotatedAssemblyItemId) {
         InstancedManager.pushBackItem(ctx.rotatedAssemblyItemId)
       }
