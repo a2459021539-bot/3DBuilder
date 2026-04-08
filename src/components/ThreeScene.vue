@@ -317,10 +317,8 @@ const setupTransformControlEvents = () => {
         }
       }))
       ctx.rotationStartSnapshot = null
-      // 旋转结束，归还弹出的零件
-      if (ctx.isAssemblyMode && ctx.rotatedAssemblyItemId) {
-        InstancedManager.pushBackItem(ctx.rotatedAssemblyItemId)
-      }
+      // 不在此处 pushBack — 保持零件弹出状态，用户可继续旋转
+      // pushBack 在 detachRotationGizmo 或切换零件时执行
     } else if (mode === 'translate' && ctx._translateStartPosition) {
       if (_batchMoveItems.length > 0) {
         // Batch move: emit one batch event
@@ -349,16 +347,13 @@ const setupTransformControlEvents = () => {
           }
         }))
       }
-      // 归还所有弹出的零件到 InstancedMesh
+      // 归还批量移动的其他零件（锚点零件在 detach 时归还）
       for (const item of _batchMoveItems) {
         InstancedManager.pushBackItem(item.id)
       }
       ctx._translateStartPosition = null
       _batchMoveItems = []
       _anchorStartPos = null
-      if (ctx.isAssemblyMode && ctx.rotatedAssemblyItemId) {
-        InstancedManager.pushBackItem(ctx.rotatedAssemblyItemId)
-      }
     }
     animLoop.requestRender()
   })

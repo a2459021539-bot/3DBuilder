@@ -1,4 +1,5 @@
 import { rotationSnapStep } from './useSceneContext.js'
+import * as InstancedManager from '../../utils/instancedAssemblyManager.js'
 
 /**
  * Unified TransformControls gizmo — supports both 'rotate' and 'translate' modes.
@@ -45,6 +46,10 @@ export function useRotationGizmo(ctx, deps) {
   }
 
   const detachRotationGizmo = () => {
+    // 归还弹出的零件到 InstancedMesh
+    if (ctx.isAssemblyMode && ctx.rotatedAssemblyItemId) {
+      InstancedManager.pushBackItem(ctx.rotatedAssemblyItemId)
+    }
     if (ctx.transformControl) {
       ctx.transformControl.detach()
       ctx.transformControl.visible = false
@@ -53,7 +58,6 @@ export function useRotationGizmo(ctx, deps) {
     ctx.selectedPipeGroup = null
     ctx.rotatedObject = null
     ctx.rotatedAssemblyItemId = null
-    if (ctx.isAssemblyMode && ctx.previewPipe) deps.freezePreviewPipeMatrices()
   }
 
   return {

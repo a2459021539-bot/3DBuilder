@@ -129,12 +129,19 @@ export function useMouseInteraction(ctx, deps) {
 
       // ---- Rotation / Move mode ----
       if (ctx.isRotationMode || ctx.isMoveMode) {
+        // 切换零件前归还上一个弹出的零件
+        if (ctx.rotatedAssemblyItemId && ctx.rotatedAssemblyItemId !== assemblyItemId) {
+          InstancedManager.pushBackItem(ctx.rotatedAssemblyItemId)
+          if (ctx.transformControl) ctx.transformControl.detach()
+        }
+
         window.dispatchEvent(new CustomEvent('assembly-item-selected', {
           detail: { id: assemblyItemId }
         }))
 
-        // 弹出临时 Group 用于交互
-        const pipeGroup = InstancedManager.popOutItem(assemblyItemId)
+        // 弹出临时 Group 用于交互（如果已弹出则复用）
+        let pipeGroup = InstancedManager.getPoppedGroup(assemblyItemId)
+        if (!pipeGroup) pipeGroup = InstancedManager.popOutItem(assemblyItemId)
         if (!pipeGroup) return
 
         if (ctx.isRotationMode) {
