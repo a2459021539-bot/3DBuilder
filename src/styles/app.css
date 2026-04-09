@@ -1444,6 +1444,36 @@ button:active {
   font-family: monospace;
 }
 
+/* 阵列已选管道列表 */
+.array-selection-list {
+  max-height: 120px;
+  overflow-y: auto;
+  margin-top: 8px;
+  padding: 6px 10px;
+  background: rgba(74, 158, 255, 0.1);
+  border: 1px solid rgba(74, 158, 255, 0.3);
+  border-radius: 4px;
+}
+
+.array-selection-item {
+  padding: 3px 0;
+  font-size: 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.array-selection-item:last-child {
+  border-bottom: none;
+}
+
+.array-selection-list::-webkit-scrollbar {
+  width: 4px;
+}
+
+.array-selection-list::-webkit-scrollbar-thumb {
+  background: rgba(74, 158, 255, 0.4);
+  border-radius: 2px;
+}
+
 /* Ctrl+S 保存提示 */
 .save-toast {
   position: fixed;

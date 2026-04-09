@@ -848,8 +848,8 @@
             <span class="hint-label">已选择管道：</span>
             <span class="hint-value">{{ arraySelection.length }} 个</span>
           </div>
-          <div v-if="arraySelection.length > 0" class="param-hint" style="margin-top: 8px;">
-            <div v-for="id in arraySelection" :key="id" style="margin: 4px 0;">
+          <div v-if="arraySelection.length > 0" class="array-selection-list">
+            <div v-for="id in arraySelection" :key="id" class="array-selection-item">
               <span class="hint-text">
                 {{ assemblyItems.find(item => item.id === id)?.name || `管道 ${id}` }}
               </span>

@@ -24,8 +24,11 @@ export function useHistoryManager(partsItems, assemblyItems, partManagerState, u
       return `Δ(${dx}, ${dy}, ${dz})`
       }
     } else if (item.type === 'rotate') {
-      const angle = ((item.endRotation - item.startRotation) * 180 / Math.PI).toFixed(1)
-      return `${item.axis.toUpperCase()}轴 ${angle}°`
+      const axis = item.axis || 'z'
+      const endVal = typeof item.endRotation === 'object' ? item.endRotation[axis] : item.endRotation
+      const startVal = typeof item.startRotation === 'object' ? item.startRotation[axis] : item.startRotation
+      const angle = ((endVal - startVal) * 180 / Math.PI).toFixed(1)
+      return `${axis.toUpperCase()}轴 ${angle}°`
     } else if (item.type === 'create') {
       return item.params ? `L:${item.params.length}` : ''
     }
@@ -39,8 +42,11 @@ export function useHistoryManager(partsItems, assemblyItems, partManagerState, u
     // editingHistoryItem.value = historyItem (ref assignment)
     
     if (item.type === 'rotate') {
-       editingStartAngleDeg.value = (item.startRotation * 180 / Math.PI).toFixed(1)
-       editingEndAngleDeg.value = (item.endRotation * 180 / Math.PI).toFixed(1)
+       const axis = item.axis || 'z'
+       const startVal = typeof item.startRotation === 'object' ? item.startRotation[axis] : item.startRotation
+       const endVal = typeof item.endRotation === 'object' ? item.endRotation[axis] : item.endRotation
+       editingStartAngleDeg.value = (startVal * 180 / Math.PI).toFixed(1)
+       editingEndAngleDeg.value = (endVal * 180 / Math.PI).toFixed(1)
     }
     
     if (uiState && uiState.showHistoryEdit) {
@@ -81,8 +87,16 @@ export function useHistoryManager(partsItems, assemblyItems, partManagerState, u
 
   const updateEditingRotationFromDegrees = () => {
       if (editingHistoryItem.value) {
-          editingHistoryItem.value.startRotation = editingStartAngleDeg.value * Math.PI / 180
-          editingHistoryItem.value.endRotation = editingEndAngleDeg.value * Math.PI / 180
+          const axis = editingHistoryItem.value.axis || 'z'
+          const startRad = editingStartAngleDeg.value * Math.PI / 180
+          const endRad = editingEndAngleDeg.value * Math.PI / 180
+          if (typeof editingHistoryItem.value.startRotation === 'object') {
+            editingHistoryItem.value.startRotation[axis] = startRad
+            editingHistoryItem.value.endRotation[axis] = endRad
+          } else {
+            editingHistoryItem.value.startRotation = startRad
+            editingHistoryItem.value.endRotation = endRad
+          }
       }
   }
 

@@ -308,12 +308,21 @@ const setupTransformControlEvents = () => {
     const mode = ctx.transformControl.mode
 
     if (mode === 'rotate' && ctx.rotationStartSnapshot) {
+      const endRot = { x: obj.rotation.x, y: obj.rotation.y, z: obj.rotation.z }
+      const startRot = ctx.rotationStartSnapshot
+      // 检测实际变化最大的轴，而非面板选择的轴
+      const dx = Math.abs(endRot.x - startRot.x)
+      const dy = Math.abs(endRot.y - startRot.y)
+      const dz = Math.abs(endRot.z - startRot.z)
+      let detectedAxis = 'z'
+      if (dx >= dy && dx >= dz) detectedAxis = 'x'
+      else if (dy >= dx && dy >= dz) detectedAxis = 'y'
       window.dispatchEvent(new CustomEvent('assembly-item-rotation-ended', {
         detail: {
           id: ctx.rotatedAssemblyItemId,
-          startRotation: { ...ctx.rotationStartSnapshot },
-          endRotation: { x: obj.rotation.x, y: obj.rotation.y, z: obj.rotation.z },
-          axis: ctx.rotationAxis
+          startRotation: { ...startRot },
+          endRotation: endRot,
+          axis: detectedAxis
         }
       }))
       ctx.rotationStartSnapshot = null
