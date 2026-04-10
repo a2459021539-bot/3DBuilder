@@ -114,12 +114,27 @@ export function getWorkspaceData(workspaceId) {
     )
     const assemblyItems = asmRes.length > 0
       ? asmRes[0].values.map(([id, originalPartId, name, type, paramsJson, px, py, pz, rx, ry, rz, assemblyTime]) => {
-          const params = paramsJson ? JSON.parse(paramsJson) : {}
+          // params_json 同时保存 params 和所有非 schema 列字段（parentGroupId/arrayConfig/expanded/children/...）
+          let params = {}
+          let extras = {}
+          if (paramsJson) {
+            try {
+              const parsed = JSON.parse(paramsJson)
+              if (parsed && typeof parsed === 'object' && parsed.__params !== undefined) {
+                params = parsed.__params || {}
+                extras = parsed.__extras || {}
+              } else {
+                // 兼容旧格式：整个 JSON 都是 params
+                params = parsed || {}
+              }
+            } catch {}
+          }
           return {
             id, originalPartId, name, type, params,
             position: { x: px || 0, y: py || 0, z: pz || 0 },
             rotation: { x: rx || 0, y: ry || 0, z: rz || 0 },
-            assemblyTime
+            assemblyTime,
+            ...extras
           }
         })
       : []
@@ -159,10 +174,12 @@ export function saveWorkspaceData(workspaceId, data) {
 
   // 整个写入包在一个事务里（否则每条 INSERT 都是独立事务，极慢）
   db.run('BEGIN TRANSACTION')
+  let failedItem = null
   try {
     // ── 写入零件 ──
     db.run('DELETE FROM parts WHERE workspace_id = ?', [workspaceId])
     for (const p of partsItems) {
+      if (!p.id) { failedItem = { kind: 'part', item: p, reason: '缺少 id' }; throw new Error('零件缺少 id') }
       db.run('INSERT INTO parts VALUES (?,?,?,?,?,?)', [
         p.id, workspaceId,
         p.name || null,
@@ -174,15 +191,27 @@ export function saveWorkspaceData(workspaceId, data) {
 
     // ── 写入装配体 ──
     db.run('DELETE FROM assembly_items WHERE workspace_id = ?', [workspaceId])
+    // 这些是有专用列或会被显式恢复的字段，不进 extras
+    const ASM_KNOWN_KEYS = new Set([
+      'id', 'originalPartId', 'name', 'type', 'params',
+      'position', 'rotation', 'assemblyTime'
+    ])
     for (const a of assemblyItems) {
-      const params = { ...a.params || {} }
+      if (!a.id) { failedItem = { kind: 'assembly', item: a, reason: '缺少 id' }; throw new Error('装配项缺少 id') }
+      // 收集 schema 之外的所有字段（parentGroupId / arrayConfig / expanded / children / ...）
+      const extras = {}
+      for (const k in a) {
+        if (!ASM_KNOWN_KEYS.has(k)) extras[k] = a[k]
+      }
+      // 包成 { __params, __extras } 双字段格式（带前缀避免与原 params 字段冲突）
+      const wrapped = { __params: a.params || {}, __extras: extras }
 
       db.run('INSERT INTO assembly_items VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)', [
         a.id, workspaceId,
         a.originalPartId || null,
         a.name || null,
         a.type || 'straight',
-        JSON.stringify(params),
+        JSON.stringify(wrapped),
         a.position?.x || 0, a.position?.y || 0, a.position?.z || 0,
         a.rotation?.x || 0, a.rotation?.y || 0, a.rotation?.z || 0,
         a.assemblyTime || null
@@ -204,9 +233,9 @@ export function saveWorkspaceData(workspaceId, data) {
 
     db.run('COMMIT')
   } catch (e) {
-    db.run('ROLLBACK')
-    console.warn('保存工作空间数据失败:', e)
-    return
+    try { db.run('ROLLBACK') } catch {}
+    console.error('[saveWorkspaceData] 失败:', e, failedItem || '')
+    throw new Error(`保存工作空间数据失败: ${e.message}${failedItem ? ` (${failedItem.kind} ${failedItem.reason})` : ''}`)
   }
 
   updateWorkspace(workspaceId, { updatedAt: new Date().toISOString() })
@@ -246,6 +275,7 @@ export function importWorkspace(importData, options = {}) {
   const workspaces = getWorkspaces()
   const existingWorkspace = workspaces.find(ws => ws.id === importData.workspace.id)
   let targetWorkspace
+  const isNewWorkspace = !(existingWorkspace && options.overwrite)
 
   if (existingWorkspace && options.overwrite) {
     targetWorkspace = updateWorkspace(existingWorkspace.id, { name: options.newName || `${importData.workspace.name} (导入)` })
@@ -253,7 +283,28 @@ export function importWorkspace(importData, options = {}) {
     targetWorkspace = createWorkspace(options.newName || `${importData.workspace.name} (导入)`)
   }
 
-  saveWorkspaceData(targetWorkspace.id, importData.data)
+  if (!targetWorkspace || !targetWorkspace.id) {
+    throw new Error('创建/更新工作空间失败')
+  }
+
+  try {
+    saveWorkspaceData(targetWorkspace.id, importData.data)
+  } catch (e) {
+    // 失败回滚：如果是新建的工作空间，删除避免留下空壳
+    if (isNewWorkspace) {
+      try { deleteWorkspace(targetWorkspace.id) } catch {}
+    }
+    throw e
+  }
+
+  // 完整性校验：写完后立刻读回，确认条数对得上
+  const verify = getWorkspaceData(targetWorkspace.id)
+  const expectedParts = importData.data.partsItems.length
+  const expectedAsm = importData.data.assemblyItems.length
+  if (verify.partsItems.length !== expectedParts || verify.assemblyItems.length !== expectedAsm) {
+    throw new Error(`数据校验失败：写入 ${expectedParts} 零件 / ${expectedAsm} 装配，读回 ${verify.partsItems.length} / ${verify.assemblyItems.length}`)
+  }
+
   return targetWorkspace
 }
 

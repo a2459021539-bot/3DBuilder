@@ -288,14 +288,23 @@ export function useJoinInteraction(ctx, deps) {
     const faceToMove = moveFirst ? firstEndFace : secondEndFace
     const faceFixed = moveFirst ? secondEndFace : firstEndFace
 
+    // 在任何修改之前先抓取该零件的"原始"transform，用于撤销
+    // popOutItem 不会修改 _itemTransforms，所以这里拿到的就是 join 之前的真实位置
+    const _moveId = pipeToMove.userData.assemblyItemId
+    const _origStored = _moveId ? InstancedManager.getItemTransform(_moveId) : null
+    const oldPosition = _origStored?.position
+      ? { x: _origStored.position.x, y: _origStored.position.y, z: _origStored.position.z }
+      : { x: pipeToMove.position.x, y: pipeToMove.position.y, z: pipeToMove.position.z }
+    const oldRotation = _origStored?.rotation
+      ? { x: _origStored.rotation.x, y: _origStored.rotation.y, z: _origStored.rotation.z }
+      : (() => {
+          const e = new THREE.Euler().setFromQuaternion(pipeToMove.quaternion)
+          return { x: e.x, y: e.y, z: e.z }
+        })()
+
     // 如果已经有预览状态，说明位置已经计算好了，直接使用当前状态
     // 否则重新计算
     if (!ctx.joinPreviewOriginalState || ctx.joinPreviewOriginalState.pipeId !== pipeToMove.userData.assemblyItemId) {
-      // 保存管道当前的位置和旋转
-      const originalPosition = pipeToMove.position.clone()
-      const originalQuaternion = pipeToMove.quaternion.clone()
-
-      // 执行拼接计算
       performJoinCalculation(pipeToMove, faceToMove, faceFixed, rotationAngle)
     }
     // 否则使用预览时已经计算好的位置（预览已经更新了管道位置）
@@ -342,10 +351,12 @@ export function useJoinInteraction(ctx, deps) {
     // 清除预览状态
     ctx.joinPreviewOriginalState = null
 
-    // 通知拼接完成
+    // 通知拼接完成（带上 join 之前的真实 transform，用于撤销）
     window.dispatchEvent(new CustomEvent('join-completed', {
       detail: {
         movedItemId: assemblyItemId,
+        oldPosition,
+        oldRotation,
         position: {
           x: pipeToMove.position.x,
           y: pipeToMove.position.y,

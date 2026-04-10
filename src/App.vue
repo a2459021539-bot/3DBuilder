@@ -472,11 +472,11 @@
             </div>
           </div>
           <div class="param-item">
-            <label class="param-label">位置 (mm)</label>
+            <label class="param-label">{{ isBatchMove ? `相对移动 ΔXYZ (mm) — ${batchSnapshotPositions.size} 个` : '位置 (mm)' }}</label>
             <div class="vector-input-group">
-              <input 
-                type="number" 
-                v-model.number="transformPosition.x" 
+              <input
+                type="number"
+                v-model.number="transformPosition.x"
                 class="param-input vector-input"
                 step="0.1"
                 placeholder="X"
@@ -635,15 +635,23 @@
         <div class="param-item">
           <label class="param-label">圆周曲面细分数</label>
           <div class="param-range-wrapper">
-            <input 
-              type="range" 
-              v-model.number="pipeParams.segments" 
+            <input
+              type="range"
+              v-model.number="pipeParams.segments"
               class="param-range"
               min="3"
-              max="32"
+              max="256"
               step="1"
             />
-            <span class="param-value">{{ pipeParams.segments }}</span>
+            <input
+              type="number"
+              v-model.number="pipeParams.segments"
+              class="param-input"
+              style="width: 64px; flex: 0 0 auto;"
+              min="3"
+              max="256"
+              step="1"
+            />
           </div>
         </div>
         <!-- 2D草图建管提示 -->
@@ -767,7 +775,7 @@
         <button type="button" @click="toggleFlatShading">{{ flatShading ? '着色：平面' : '着色：平滑' }}</button>
         <button @click="lodAutoMode = !lodAutoMode">{{ lodAutoMode ? '自动优化' : '手动优化' }}</button>
         <template v-if="!lodAutoMode">
-          <input type="number" v-model.number="lodManualSegments" min="3" max="16" style="width:50px;" @change="applyManualLod" />
+          <input type="number" v-model.number="lodManualSegments" min="3" max="256" style="width:60px;" @change="applyManualLod" @input="applyManualLod" />
         </template>
       </div>
     </div>
@@ -1146,15 +1154,32 @@ const arrayLoadingProgress = ref(0)
 // LOD 自动/手动切换
 const showSettings = ref(false)
 const lodAutoMode = ref(true)
-const lodManualSegments = ref(8)
+const lodManualSegments = ref(16)
 const applyManualLod = () => {
-  const v = Math.max(3, Math.min(16, lodManualSegments.value))
+  const v = Math.max(3, Math.min(256, lodManualSegments.value))
   lodManualSegments.value = v
-  window.dispatchEvent(new CustomEvent('lod-mode-change', { detail: { auto: false, segments: v } }))
+  // InstancedMesh 重构后 ctx.previewPipe 是空标记 Group，
+  // useLodSystem 拿不到真实的装配项；这里直接把当前数据 + 覆盖后的 segments
+  // 通过事件 detail 传过去，让 ThreeScene 走完整的 forceRebuild。
+  const items = (assemblyItems.value || [])
+    .filter(item => item.type !== 'array-group')
+    .map(item => ({
+      ...item,
+      params: { ...(item.params || {}), segments: v }
+    }))
+  window.dispatchEvent(new CustomEvent('lod-mode-change', {
+    detail: { auto: false, segments: v, items }
+  }))
 }
 watch(lodAutoMode, (val) => {
   if (val) {
-    window.dispatchEvent(new CustomEvent('lod-mode-change', { detail: { auto: true } }))
+    // 切回自动：用 assemblyItems 原始 segments 重建
+    const items = (assemblyItems.value || [])
+      .filter(item => item.type !== 'array-group')
+      .map(item => ({ ...item, params: { ...(item.params || {}) } }))
+    window.dispatchEvent(new CustomEvent('lod-mode-change', {
+      detail: { auto: true, items }
+    }))
   } else {
     applyManualLod()
   }
@@ -1258,8 +1283,9 @@ const {
   rotationAxis, rotationAngle, selectedAssemblyItemId,
   arrayDirection, arraySign, arraySpacing, arrayCount,
   transformType, transformingItemId, transformPosition, transformRotation, transformRotationDeg, transformAxis, movePlane,
-  setMode, updateRotationAxis, previewRotationAngle, applyRotationAngle, resetArraySelection, executeArray, 
-  setMovePlane, updateTransformPosition, updateTransformRotationFromDegrees
+  setMode, updateRotationAxis, previewRotationAngle, applyRotationAngle, resetArraySelection, executeArray,
+  setMovePlane, updateTransformPosition, updateTransformRotationFromDegrees,
+  isBatchMove, batchSnapshotPositions
 } = transformLogic
 
 // 6. Join Logic
@@ -1405,7 +1431,7 @@ const eventBridge = useEventBridge(assemblyItems, historyItems, {
   selectedAssemblyItemId, updateRotationAxis, currentPartType, pipeParams
 })
 const { rendererType, previewJoinRotation,
-  handleDragEnded, handleBatchDragEnded, handleRotationEnded, handleJoinCompleted,
+  handleDragEnded, handleBatchDragEnded, handleRotationEnded, handleBatchRotationEnded, handleJoinCompleted,
   handleShowTransformPanel, handleAssemblyItemSelected, handleAssemblyItemPositionUpdated,
   handleAssemblyItemRotationUpdated, handleEndFaceSelected,
   handleSketch2DPathDataSync, handleSketch3DPathDataSync, handleRendererSwitched
@@ -1461,6 +1487,7 @@ onMounted(async () => {
   window.addEventListener('assembly-item-drag-ended', handleDragEnded)
   window.addEventListener('assembly-items-batch-drag-ended', handleBatchDragEnded)
   window.addEventListener('assembly-item-rotation-ended', handleRotationEnded)
+  window.addEventListener('assembly-items-batch-rotation-ended', handleBatchRotationEnded)
   window.addEventListener('join-completed', handleJoinCompleted)
   window.addEventListener('show-transform-panel', handleShowTransformPanel)
   window.addEventListener('assembly-item-selected', handleAssemblyItemSelected)
@@ -1483,6 +1510,7 @@ onBeforeUnmount(() => {
   window.removeEventListener('assembly-item-drag-ended', handleDragEnded)
   window.removeEventListener('assembly-items-batch-drag-ended', handleBatchDragEnded)
   window.removeEventListener('assembly-item-rotation-ended', handleRotationEnded)
+  window.removeEventListener('assembly-items-batch-rotation-ended', handleBatchRotationEnded)
   window.removeEventListener('join-completed', handleJoinCompleted)
   window.removeEventListener('show-transform-panel', handleShowTransformPanel)
   window.removeEventListener('assembly-item-selected', handleAssemblyItemSelected)

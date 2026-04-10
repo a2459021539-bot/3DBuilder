@@ -44,7 +44,8 @@ export function createReducerPipe(params, pipeMaterial, assemblyItemId) {
     }
   }
 
-  const radialSegments = Math.max(segments || 8, 3)
+  const _segNum = Number(segments)
+  const radialSegments = Number.isFinite(_segNum) && _segNum >= 3 ? Math.floor(_segNum) : 16
 
   const firstSection = allSections[0]
   const lastSection = allSections[allSections.length - 1]

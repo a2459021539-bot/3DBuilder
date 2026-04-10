@@ -160,11 +160,24 @@ export function useMouseInteraction(ctx, deps) {
         } else {
           deps.attachTranslateGizmo(pipeGroup, assemblyItemId)
           const t = InstancedManager.getItemTransform(assemblyItemId)
+          // 多选时同时把所有选中零件的快照传给面板，启用批量相对移动
+          const selectedIds = Array.from(ctx.selectedAssemblyItemIds || [])
+          let batchItems = null
+          if (selectedIds.length > 1 && selectedIds.includes(assemblyItemId)) {
+            batchItems = []
+            for (const id of selectedIds) {
+              const it = InstancedManager.getItemTransform(id)
+              if (it?.position) {
+                batchItems.push({ id, position: { x: it.position.x, y: it.position.y, z: it.position.z } })
+              }
+            }
+          }
           window.dispatchEvent(new CustomEvent('show-transform-panel', {
             detail: {
               type: 'move',
               id: assemblyItemId,
-              position: t?.position || { x: 0, y: 0, z: 0 }
+              position: t?.position || { x: 0, y: 0, z: 0 },
+              batchItems
             }
           }))
         }

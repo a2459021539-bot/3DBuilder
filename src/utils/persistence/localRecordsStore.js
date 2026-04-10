@@ -42,7 +42,11 @@ export function saveRecords({ partsItems, assemblyItems, historyItems }) {
   if (!workspaceId) return
 
   const payload = normalizeRecords({ partsItems, assemblyItems, historyItems })
-  saveWorkspaceData(workspaceId, payload)
+  try {
+    saveWorkspaceData(workspaceId, payload)
+  } catch (e) {
+    console.error('[saveRecords] 自动保存失败:', e)
+  }
 }
 
 export function clearRecords() {

@@ -17,19 +17,17 @@ export const formatLength = (mm) => {
   return `${mm}mm`
 }
 
-// LRU texture cache — grid labels repeat heavily (e.g. "100mm" appears many times)
+// 文字纹理缓存 — 网格标签字符串重复率极高（"100mm"、"1m" 等只有有限几种）。
+// 注意：缓存中的 texture 会被多个场景对象（不同时期的 grid sprite）共享，
+// 所以绝不能在驱逐时 dispose——会导致仍在场景中的 sprite 变成空白。
+// 标签的唯一字符串数量天然有界（约几十个），这里用 Map 直接存全量，
+// 不做容量限制 / 驱逐。
 const _textureCache = new Map()
-const _TEXTURE_CACHE_MAX = 128
 
 const createTextTexture = (text, fontSize = 32, color = 'rgba(255, 255, 255, 0.9)') => {
   const key = `${text}|${fontSize}|${color}`
-  if (_textureCache.has(key)) {
-    // Move to end (most-recently-used)
-    const tex = _textureCache.get(key)
-    _textureCache.delete(key)
-    _textureCache.set(key, tex)
-    return tex
-  }
+  const cached = _textureCache.get(key)
+  if (cached) return cached
 
   const canvas = document.createElement('canvas')
   const context = canvas.getContext('2d')
@@ -43,13 +41,6 @@ const createTextTexture = (text, fontSize = 32, color = 'rgba(255, 255, 255, 0.9
   const texture = new THREE.CanvasTexture(canvas)
   texture.needsUpdate = true
 
-  // Evict oldest if over limit
-  if (_textureCache.size >= _TEXTURE_CACHE_MAX) {
-    const oldest = _textureCache.keys().next().value
-    const oldTex = _textureCache.get(oldest)
-    oldTex.dispose()
-    _textureCache.delete(oldest)
-  }
   _textureCache.set(key, texture)
   return texture
 }
@@ -94,14 +85,21 @@ export function useSceneGrid(ctx) {
   const getLastGridCenter = () => lastGridCenter
 
   // --- Disposal helpers ---
+  // 关键：Sprite 共享一个全局静态 BufferGeometry（three.js 内部 _geometry 单例），
+  // 所以 dispose sprite.geometry 会把所有 sprite 的 geometry 一起干掉，
+  // 之后整个程序的 sprite（包括坐标轴 XYZ、网格标签）全部不显示。
+  // 同样 SpriteMaterial 的 map 来自模块级 _textureCache，多个 sprite 共享，也不能 dispose。
+  // 结论：sprite 子节点不做任何 dispose，仅由 GC 回收 JS 对象。
   const safeDisposeGridGroup = (group) => {
     if (!group) return
     try {
       group.traverse((c) => {
+        if (c.isSprite) return // 共享 geometry / 共享 texture，不可 dispose
         if (c.geometry) { try { c.geometry.dispose() } catch (_) {} }
         if (c.material) {
           const mats = Array.isArray(c.material) ? c.material : [c.material]
           for (const m of mats) {
+            if (m.isSpriteMaterial) continue // 双保险
             if (m.map) { try { m.map.dispose() } catch (_) {} }
             try { m.dispose() } catch (_) {}
           }
@@ -175,12 +173,10 @@ export function useSceneGrid(ctx) {
     const coarseCx = Math.round(target.x / coarseStep) * coarseStep
     const coarseCz = Math.round(target.z / coarseStep) * coarseStep
 
-    const isWebGPUBackend = ctx.renderer?.backend?.isWebGPUBackend === true
-    if (isWebGPUBackend && gridGroup) {
-      updateScaleBar()
-      return
-    }
-    if (!isWebGPUBackend && step === lastGridStep && Math.abs(fineCx - lastGridCenter.x) < step * 0.5 && Math.abs(fineCz - lastGridCenter.z) < step * 0.5) {
+    // 只有在 step 和中心点都没有明显变化时才跳过重建（WebGL/WebGPU 都适用）
+    // 之前 WebGPU 路径直接 return 永不重建，导致标签停留在初始位置，
+    // 用户移动相机后标签一直在世界的旧位置，看起来"后面就不显示了"。
+    if (step === lastGridStep && Math.abs(fineCx - lastGridCenter.x) < step * 0.5 && Math.abs(fineCz - lastGridCenter.z) < step * 0.5) {
       updateScaleBar()
       return
     }

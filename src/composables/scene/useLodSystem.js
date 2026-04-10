@@ -140,23 +140,20 @@ export function useLodSystem(ctx, deps) {
   }
 
   const handleLodModeChange = (event) => {
-    const { auto, segments } = event.detail
+    const { auto, segments, items } = event.detail
     ctx._lodAutoMode = auto
-    if (auto) {
-      scheduleProgressiveRefine()
-    } else if (ctx.previewPipe) {
-      if (ctx._refineRAF) { cancelAnimationFrame(ctx._refineRAF); ctx._refineRAF = null }
-      // 从现有管道提取数据，覆盖 segments，复用 updateAssemblyView 重建
-      const items = [...ctx.previewPipe.children]
-        .filter(c => c.userData._originalParams)
-        .map(c => ({
-          id: c.userData.assemblyItemId,
-          type: c.userData._originalParams.type,
-          params: { ...c.userData._originalParams, segments },
-          position: { x: c.position.x, y: c.position.y, z: c.position.z },
-          rotation: { x: c.rotation.x, y: c.rotation.y, z: c.rotation.z }
-        }))
+    if (ctx._refineRAF) { cancelAnimationFrame(ctx._refineRAF); ctx._refineRAF = null }
+
+    // 切到手动 / 切回自动 都需要拿真实的 assemblyItems 重建。
+    // InstancedMesh 重构之后 ctx.previewPipe 只是空标记 Group，children 永远拿不到，
+    // 所以必须依赖事件 detail 里 App.vue 传过来的 items（来自 assemblyItems.value）。
+    if (items && items.length > 0) {
       deps.updateAssemblyView(items, true, true)
+    }
+
+    if (auto) {
+      // 自动模式：开启 FPS 自适应渐进 refine
+      scheduleProgressiveRefine()
     }
   }
 

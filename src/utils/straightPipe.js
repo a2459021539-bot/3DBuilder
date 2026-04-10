@@ -17,11 +17,13 @@ const LATHE_B = new THREE.Vector3(1, 0, 0)
 export function createStraightPipe(params, pipeMaterial, assemblyItemId) {
   const { innerDiameter, outerDiameter, length, segments } = params
 
-  if (length <= 0) return null
+  if (!(length > 0)) return null  // 同时挡住 NaN/undefined/0/负
 
   const outerRadius = outerDiameter / 2
   const innerRadius = innerDiameter / 2
-  const radialSegments = Math.max(segments, 3)
+  // 兜底：segments 为 NaN/undefined/null/0/负 时回退到 16
+  const segNum = Number(segments)
+  const radialSegments = Number.isFinite(segNum) && segNum >= 3 ? Math.floor(segNum) : 16
   const halfLength = length / 2
 
   const points = [

@@ -145,8 +145,10 @@ export function useAssemblyView(ctx, deps) {
       setTimeout(() => { handleResize() }, 100)
     }
 
+    // 工作空间切换 → 强制全量重建（forceRebuild=true），不走增量分支
+    ctx.isAssemblyMode = false
     if (event.detail?.assemblyItems?.length > 0) {
-      updateAssemblyView(event.detail.assemblyItems, true)
+      updateAssemblyView(event.detail.assemblyItems, false, true)
     }
   }
 

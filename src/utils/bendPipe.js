@@ -37,7 +37,8 @@ export function createBendPipe(params, pipeMaterial, assemblyItemId) {
   const outerRadius = outerDiameter / 2
   const innerRadius = innerDiameter / 2
   
-  const curveSegs = Math.max(segments || 12, 3)
+  const _segNum = Number(segments)
+  const curveSegs = Number.isFinite(_segNum) && _segNum >= 3 ? Math.floor(_segNum) : 16
 
   const shape = createPipeSection(outerRadius, innerRadius, curveSegs)
   

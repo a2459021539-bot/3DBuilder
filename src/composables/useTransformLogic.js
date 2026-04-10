@@ -1,4 +1,5 @@
 import { ref } from 'vue'
+import * as InstancedManager from '../utils/instancedAssemblyManager.js'
 
 export function useTransformLogic(assemblyItems, historyItems) {
   // 旋转模式相关状态
@@ -23,6 +24,26 @@ export function useTransformLogic(assemblyItems, historyItems) {
   const transformRotationDeg = ref({ x: 0, y: 0, z: 0 })
   const transformAxis = ref('z')
   const movePlane = ref('free') // 'free', 'xy', 'yz', 'zx'
+
+  // 批量移动状态：transformPosition 表示相对锚点起点的 delta，而不是绝对位置
+  const isBatchMove = ref(false)
+  // id → {x,y,z}：每个被批量选中零件在面板打开时的初始位置
+  const batchSnapshotPositions = ref(new Map())
+
+  const setBatchMoveMode = (items, anchorId) => {
+    isBatchMove.value = true
+    batchSnapshotPositions.value = new Map()
+    items.forEach(({ id, position }) => {
+      batchSnapshotPositions.value.set(id, { x: position.x, y: position.y, z: position.z })
+    })
+    transformingItemId.value = anchorId
+    transformPosition.value = { x: 0, y: 0, z: 0 }
+  }
+
+  const clearBatchMoveMode = () => {
+    isBatchMove.value = false
+    batchSnapshotPositions.value = new Map()
+  }
 
   const setMode = (mode) => {
     // Reset all modes first
@@ -207,14 +228,53 @@ export function useTransformLogic(assemblyItems, historyItems) {
   }
 
   const updateTransformPosition = () => {
-    if (transformingItemId.value && assemblyItems) {
-       const item = assemblyItems.value.find(i => i.id === transformingItemId.value)
-       if (item) {
-           item.position = { ...transformPosition.value }
-           window.dispatchEvent(new CustomEvent('update-part-transform', {
-               detail: { id: item.id, position: item.position, isUserInput: true }
-           }))
-       }
+    if (!assemblyItems) return
+
+    if (isBatchMove.value && batchSnapshotPositions.value.size > 0) {
+      // 批量模式：transformPosition.value 是相对各自快照的 delta
+      const delta = transformPosition.value
+      for (const [id, snapshot] of batchSnapshotPositions.value) {
+        const item = assemblyItems.value.find(i => i.id === id)
+        if (!item) continue
+        const newPos = {
+          x: snapshot.x + (delta.x || 0),
+          y: snapshot.y + (delta.y || 0),
+          z: snapshot.z + (delta.z || 0)
+        }
+        item.position = newPos
+
+        // 同步 3D 场景：弹出的临时 Group 直接改 position；
+        // 未弹出的零件通过 InstancedMesh 实例矩阵更新
+        const popped = InstancedManager.getPoppedGroup(id)
+        if (popped) {
+          popped.position.set(newPos.x, newPos.y, newPos.z)
+          popped.updateMatrix()
+          popped.updateMatrixWorld(true)
+        } else {
+          const t = InstancedManager.getItemTransform(id)
+          InstancedManager.updateItemTransform(id, newPos, t?.rotation || item.rotation || { x: 0, y: 0, z: 0 })
+        }
+      }
+      window.dispatchEvent(new CustomEvent('request-render'))
+      return
+    }
+
+    if (transformingItemId.value) {
+      const item = assemblyItems.value.find(i => i.id === transformingItemId.value)
+      if (item) {
+        item.position = { ...transformPosition.value }
+        // 同步 3D 场景
+        const popped = InstancedManager.getPoppedGroup(item.id)
+        if (popped) {
+          popped.position.set(item.position.x, item.position.y, item.position.z)
+          popped.updateMatrix()
+          popped.updateMatrixWorld(true)
+        } else {
+          const t = InstancedManager.getItemTransform(item.id)
+          InstancedManager.updateItemTransform(item.id, item.position, t?.rotation || item.rotation || { x: 0, y: 0, z: 0 })
+        }
+        window.dispatchEvent(new CustomEvent('request-render'))
+      }
     }
   }
   
@@ -259,6 +319,10 @@ export function useTransformLogic(assemblyItems, historyItems) {
     executeArray,
     setMovePlane,
     updateTransformPosition,
-    updateTransformRotationFromDegrees
+    updateTransformRotationFromDegrees,
+    isBatchMove,
+    batchSnapshotPositions,
+    setBatchMoveMode,
+    clearBatchMoveMode
   }
 }

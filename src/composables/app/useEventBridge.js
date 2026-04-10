@@ -124,20 +124,63 @@ export function useEventBridge(assemblyItems, historyItems, transformLogic, join
     }
   }
 
+  const handleBatchRotationEnded = (event) => {
+    const { items, axis } = event.detail
+    if (!items || items.length === 0) return
+
+    // 同步所有零件的 position + rotation
+    items.forEach(({ id, endPosition, endRotation }) => {
+      const item = assemblyItems.value.find(i => i.id === id)
+      if (item) {
+        if (endPosition) item.position = { ...endPosition }
+        if (endRotation) item.rotation = { ...endRotation }
+      }
+    })
+
+    const itemNames = items.map(({ id }) => {
+      const item = assemblyItems.value.find(i => i.id === id)
+      return item ? item.name : `管道 ${id}`
+    }).join('、')
+
+    const historyItem = {
+      id: `hist_${Date.now()}`,
+      type: 'rotate',
+      targetId: items[0].id,
+      name: `批量旋转: ${itemNames}`,
+      time: new Date().toLocaleTimeString(),
+      isBatch: true,
+      axis: axis,
+      batchItems: items.map(({ id, startPosition, endPosition, startRotation, endRotation }) => ({
+        id,
+        startPosition: startPosition ? { ...startPosition } : undefined,
+        endPosition: endPosition ? { ...endPosition } : undefined,
+        startRotation: startRotation ? { ...startRotation } : undefined,
+        endRotation: endRotation ? { ...endRotation } : undefined
+      }))
+    }
+
+    addOrMergeHistory(historyItem)
+  }
+
   // ---- Join ----
 
   const handleJoinCompleted = (event) => {
-    const { movedItemId, position, rotation } = event.detail
+    const { movedItemId, position, rotation, oldPosition: detailOldPos, oldRotation: detailOldRot } = event.detail
     const item = assemblyItems.value.find(i => i.id === movedItemId)
     if (item) {
+      // 注意：assembly-item-position-updated/rotation-updated 事件可能在 join-completed
+      // 之前先派发并把 item.position/rotation 改成新值，所以这里不能再读 item.* 取旧值。
+      // 优先用事件 detail 中带的 oldPosition/oldRotation（来自 InstancedManager 的存储）。
+      const oldPos = detailOldPos || { ...item.position }
+      const oldRot = detailOldRot || { ...item.rotation }
       const historyItem = {
         id: `hist_${Date.now()}`,
         type: 'join',
         targetId: movedItemId,
         name: `拼接: ${item.name}`,
         time: new Date().toLocaleTimeString(),
-        oldPosition: { ...item.position },
-        oldRotation: { ...item.rotation },
+        oldPosition: { ...oldPos },
+        oldRotation: { ...oldRot },
         newPosition: { ...position },
         newRotation: { ...rotation }
       }
@@ -150,13 +193,19 @@ export function useEventBridge(assemblyItems, historyItems, transformLogic, join
   // ---- Transform Panel ----
 
   const handleShowTransformPanel = (event) => {
-    const { type, id, position, rotation } = event.detail
+    const { type, id, position, rotation, batchItems } = event.detail
 
     transformLogic.transformType.value = type
     transformLogic.transformingItemId.value = id
 
-    if (position) {
-      transformLogic.transformPosition.value = { ...position }
+    // 批量移动：显示相对 delta，启用批量模式；否则恢复单选模式
+    if (type === 'move' && batchItems && batchItems.length > 1) {
+      transformLogic.setBatchMoveMode(batchItems, id)
+    } else {
+      transformLogic.clearBatchMoveMode()
+      if (position) {
+        transformLogic.transformPosition.value = { ...position }
+      }
     }
 
     if (rotation) {
@@ -192,8 +241,20 @@ export function useEventBridge(assemblyItems, historyItems, transformLogic, join
       item.position = { ...position }
     }
 
-    if (transformLogic.showTransformPanel.value && transformLogic.transformingItemId.value === id && transformLogic.transformType.value === 'move' && !isUserInput) {
-      transformLogic.transformPosition.value = { ...position }
+    if (transformLogic.showTransformPanel.value && transformLogic.transformType.value === 'move' && !isUserInput) {
+      // 批量模式：用锚点位置变化推算累积 delta，刷新面板显示
+      if (transformLogic.isBatchMove.value && transformLogic.transformingItemId.value === id) {
+        const snapshot = transformLogic.batchSnapshotPositions.value.get(id)
+        if (snapshot) {
+          transformLogic.transformPosition.value = {
+            x: position.x - snapshot.x,
+            y: position.y - snapshot.y,
+            z: position.z - snapshot.z
+          }
+        }
+      } else if (!transformLogic.isBatchMove.value && transformLogic.transformingItemId.value === id) {
+        transformLogic.transformPosition.value = { ...position }
+      }
     }
   }
 
@@ -294,6 +355,7 @@ export function useEventBridge(assemblyItems, historyItems, transformLogic, join
     handleDragEnded,
     handleBatchDragEnded,
     handleRotationEnded,
+    handleBatchRotationEnded,
     handleJoinCompleted,
     handleShowTransformPanel,
     handleAssemblyItemSelected,

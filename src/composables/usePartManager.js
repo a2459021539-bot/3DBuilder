@@ -18,21 +18,61 @@ export function usePartManager(assemblyItems, historyItems, uiState) {
   const currentPartType = ref('straight')
   const sectionCollapsed = ref(new Map())
 
-  // Watch pipeParams for changes and dispatch update events
+  // 用户在 number 输入框里清空、输入非法值（"", NaN, 字符串, 超界）都会让
+  // pipeParams.segments 变成无效值。直接派发到 createStraightPipe 会得到
+  // Math.max(NaN, 3) = NaN → LatheGeometry 退化 → 模型彻底不显示。
+  // 这里强制把所有数值字段都钳到合法范围（fields 中所有 key 都会被处理，
+  // 即使 raw[k] 是 undefined / NaN / "" / 字符串 / 负数 / 超上限，都会回退）。
+  // 同时上限固定为 256（大幅高于上限会造成几何卡顿）。
+  const sanitizePipeParams = (raw) => {
+    const safe = { ...raw }
+    const numFields = {
+      innerDiameter: { min: 0.1, max: 100000, fallback: 8 },
+      outerDiameter: { min: 0.1, max: 100000, fallback: 10 },
+      length:        { min: 0.1, max: 1000000, fallback: 100 },
+      bendRadius:    { min: 0.1, max: 1000000, fallback: 50 },
+      bendAngle:     { min: 1,   max: 360,    fallback: 90 },
+      segments:      { min: 3,   max: 256,    fallback: 16, integer: true }
+    }
+    for (const k in numFields) {
+      const cfg = numFields[k]
+      const raw_v = safe[k]
+      // 不在 raw 里的字段（比如 reducer 没有 length、bend 没有 sections），
+      // 但只要被使用就需要 fallback；为了简化，所有 key 都强制写入 fallback。
+      let v
+      if (raw_v === undefined || raw_v === null || raw_v === '') {
+        v = cfg.fallback
+      } else {
+        v = Number(raw_v)
+        if (!Number.isFinite(v)) v = cfg.fallback
+        else if (v < cfg.min) v = cfg.min
+        else if (v > cfg.max) v = cfg.max
+      }
+      if (cfg.integer) v = Math.round(v)
+      safe[k] = v
+    }
+    // outerDiameter 必须严格大于 innerDiameter，否则无壁厚
+    if (safe.outerDiameter <= safe.innerDiameter) {
+      safe.outerDiameter = safe.innerDiameter + 1
+    }
+    return safe
+  }
+
   // Watch pipeParams for changes and dispatch update events
   watch(pipeParams, (newParams) => {
+    const cleaned = sanitizePipeParams(newParams)
     if (currentPartType.value === 'sketch2d') {
       // 修复: 确保2D草图模式下参数变化触发更新
       window.dispatchEvent(new CustomEvent('sketch2d-params-update', {
-        detail: { ...newParams, type: 'sketch2d', forceUpdate: true }
+        detail: { ...cleaned, type: 'sketch2d', forceUpdate: true }
       }))
     } else if (currentPartType.value === 'sketch3d') {
       window.dispatchEvent(new CustomEvent('sketch3d-params-update', {
-        detail: { ...newParams, type: 'sketch3d', forceUpdate: true }
+        detail: { ...cleaned, type: 'sketch3d', forceUpdate: true }
       }))
     } else {
       window.dispatchEvent(new CustomEvent('update-pipe-preview', {
-        detail: { ...newParams, type: currentPartType.value }
+        detail: { ...cleaned, type: currentPartType.value }
       }))
     }
   }, { deep: true, immediate: true })
@@ -205,8 +245,10 @@ export function usePartManager(assemblyItems, historyItems, uiState) {
       }
     }
     
-    const params = JSON.parse(JSON.stringify(pipeParams.value))
-    
+    // 保存前再次清洗，避免无效的 NaN/undefined/超界值持久化到 part.params，
+    // 否则下次 InstancedManager 拿这份 params 创建模板会得到退化几何（消失）
+    const params = JSON.parse(JSON.stringify(sanitizePipeParams(pipeParams.value)))
+
     // 对于2D草图建管，确保pathData被包含在保存的参数中
     if (currentPartType.value === 'sketch2d') {
       if (!params.pathData || !params.pathData.segments || params.pathData.segments.length === 0) {
@@ -241,9 +283,12 @@ export function usePartManager(assemblyItems, historyItems, uiState) {
             }
           })
           
-           // Refresh assembly view if needed
-           // We'll rely on App.vue to handle view refresh or trigger it here if we had access to the state
-           window.dispatchEvent(new CustomEvent('refresh-assembly-view'))
+           // Refresh assembly view: 关键 — segments 等几何参数变了，
+           // InstancedManager 缓存的模板需要按新指纹重建。
+           // 通过事件 detail 把 assemblyItems 传过去，让 ThreeScene 的监听器走 forceRebuild。
+           window.dispatchEvent(new CustomEvent('refresh-assembly-view', {
+             detail: { assemblyItems: assemblyItems.value }
+           }))
         }
       }
     } else {

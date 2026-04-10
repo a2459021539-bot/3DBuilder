@@ -221,6 +221,16 @@ const setupTransformControlEvents = () => {
   let _batchMoveItems = []   // { id, group, startPos: {x,y,z} }
   let _anchorStartPos = null // anchor pipe's start position
 
+  // ---- Batch rotate state ----
+  // 旋转时其他选中零件围绕锚点 pivot 一起旋转
+  let _batchRotateItems = []   // { id, group, startPos:{x,y,z}, startQuat:THREE.Quaternion }
+  let _anchorRotateStartPos = null // anchor 在 mouseDown 时的 position
+  let _anchorRotateStartQuat = null // anchor 在 mouseDown 时的 quaternion
+  const _tmpDeltaQuat = new THREE.Quaternion()
+  const _tmpInvStartQuat = new THREE.Quaternion()
+  const _tmpRel = new THREE.Vector3()
+  const _tmpItemQuat = new THREE.Quaternion()
+
   ctx.transformControl.addEventListener('mouseDown', () => {
     const obj = ctx.transformControl.object
     if (!obj) return
@@ -228,6 +238,24 @@ const setupTransformControlEvents = () => {
     if (mode === 'rotate') {
       ctx.rotationStartSnapshot = {
         x: obj.rotation.x, y: obj.rotation.y, z: obj.rotation.z
+      }
+      // 记录 anchor 起始 position/quaternion，用于批量绕锚点旋转
+      _anchorRotateStartPos = { x: obj.position.x, y: obj.position.y, z: obj.position.z }
+      _anchorRotateStartQuat = obj.quaternion.clone()
+      _batchRotateItems = []
+      for (const id of ctx.selectedAssemblyItemIds) {
+        if (id === ctx.rotatedAssemblyItemId) continue
+        let group = InstancedManager.getPoppedGroup(id)
+        if (!group) group = InstancedManager.popOutItem(id)
+        if (group) {
+          unfreezeObjectSubtree(group)
+          _batchRotateItems.push({
+            id,
+            group,
+            startPos: { x: group.position.x, y: group.position.y, z: group.position.z },
+            startQuat: group.quaternion.clone()
+          })
+        }
       }
     } else if (mode === 'translate') {
       // Record start positions of ALL selected items
@@ -266,6 +294,47 @@ const setupTransformControlEvents = () => {
           isUserInput: false
         }
       }))
+
+      // 批量旋转：其他选中零件绕锚点 pivot 同步旋转
+      if (_batchRotateItems.length > 0 && _anchorRotateStartQuat && _anchorRotateStartPos) {
+        // delta = currentQuat * inverse(startQuat)
+        _tmpInvStartQuat.copy(_anchorRotateStartQuat).invert()
+        _tmpDeltaQuat.copy(obj.quaternion).multiply(_tmpInvStartQuat)
+
+        for (const item of _batchRotateItems) {
+          // 位置：相对锚点的偏移先做 delta 旋转，再加回锚点起点
+          _tmpRel.set(
+            item.startPos.x - _anchorRotateStartPos.x,
+            item.startPos.y - _anchorRotateStartPos.y,
+            item.startPos.z - _anchorRotateStartPos.z
+          )
+          _tmpRel.applyQuaternion(_tmpDeltaQuat)
+          item.group.position.set(
+            _tmpRel.x + _anchorRotateStartPos.x,
+            _tmpRel.y + _anchorRotateStartPos.y,
+            _tmpRel.z + _anchorRotateStartPos.z
+          )
+          // 朝向：delta * startQuat
+          _tmpItemQuat.copy(_tmpDeltaQuat).multiply(item.startQuat)
+          item.group.quaternion.copy(_tmpItemQuat)
+          item.group.updateMatrix()
+          item.group.updateMatrixWorld(true)
+
+          window.dispatchEvent(new CustomEvent('assembly-item-position-updated', {
+            detail: {
+              id: item.id,
+              position: { x: item.group.position.x, y: item.group.position.y, z: item.group.position.z }
+            }
+          }))
+          window.dispatchEvent(new CustomEvent('assembly-item-rotation-updated', {
+            detail: {
+              id: item.id,
+              rotation: { x: item.group.rotation.x, y: item.group.rotation.y, z: item.group.rotation.z },
+              isUserInput: false
+            }
+          }))
+        }
+      }
     } else if (mode === 'translate') {
       // Compute delta from anchor's start position
       const dx = obj.position.x - _anchorStartPos.x
@@ -317,16 +386,53 @@ const setupTransformControlEvents = () => {
       let detectedAxis = 'z'
       if (dx >= dy && dx >= dz) detectedAxis = 'x'
       else if (dy >= dx && dy >= dz) detectedAxis = 'y'
-      window.dispatchEvent(new CustomEvent('assembly-item-rotation-ended', {
-        detail: {
+
+      if (_batchRotateItems.length > 0) {
+        // 批量旋转：派发批量事件，包含锚点 + 所有跟随零件
+        const items = [{
           id: ctx.rotatedAssemblyItemId,
+          startPosition: _anchorRotateStartPos ? { ..._anchorRotateStartPos } : { x: obj.position.x, y: obj.position.y, z: obj.position.z },
+          endPosition: { x: obj.position.x, y: obj.position.y, z: obj.position.z },
           startRotation: { ...startRot },
-          endRotation: endRot,
-          axis: detectedAxis
+          endRotation: endRot
+        }]
+        for (const item of _batchRotateItems) {
+          // 用 startQuat 反推起始 Euler
+          const sEuler = new THREE.Euler().setFromQuaternion(item.startQuat)
+          items.push({
+            id: item.id,
+            startPosition: { ...item.startPos },
+            endPosition: { x: item.group.position.x, y: item.group.position.y, z: item.group.position.z },
+            startRotation: { x: sEuler.x, y: sEuler.y, z: sEuler.z },
+            endRotation: { x: item.group.rotation.x, y: item.group.rotation.y, z: item.group.rotation.z }
+          })
         }
-      }))
+        window.dispatchEvent(new CustomEvent('assembly-items-batch-rotation-ended', {
+          detail: { items, axis: detectedAxis }
+        }))
+        // 同步 InstancedMesh 数据 + 归还跟随零件（锚点保持弹出，便于继续旋转）
+        for (const item of _batchRotateItems) {
+          InstancedManager.updateItemTransform(item.id,
+            { x: item.group.position.x, y: item.group.position.y, z: item.group.position.z },
+            { x: item.group.rotation.x, y: item.group.rotation.y, z: item.group.rotation.z }
+          )
+          InstancedManager.pushBackItem(item.id)
+        }
+        _batchRotateItems = []
+        _anchorRotateStartPos = null
+        _anchorRotateStartQuat = null
+      } else {
+        window.dispatchEvent(new CustomEvent('assembly-item-rotation-ended', {
+          detail: {
+            id: ctx.rotatedAssemblyItemId,
+            startRotation: { ...startRot },
+            endRotation: endRot,
+            axis: detectedAxis
+          }
+        }))
+      }
       ctx.rotationStartSnapshot = null
-      // 不在此处 pushBack — 保持零件弹出状态，用户可继续旋转
+      // 锚点不在此处 pushBack — 保持弹出状态，用户可继续旋转
       // pushBack 在 detachRotationGizmo 或切换零件时执行
     } else if (mode === 'translate' && ctx._translateStartPosition) {
       if (_batchMoveItems.length > 0) {
@@ -476,18 +582,104 @@ const handleFlatShadingSetting = (event) => {
   animLoop.requestRender()
 }
 
+// 根据当前 isRotationMode/isMoveMode 同步 gizmo 状态：
+// - 都为 false：分离 gizmo
+// - 至少一个为 true：找到已选中的零件（优先 ctx.rotatedAssemblyItemId，
+//   否则取 ctx.selectedAssemblyItemIds 第一个），弹出并按当前模式附加 gizmo
+const _applyTransformGizmoState = () => {
+  const desiredMode = ctx.isRotationMode ? 'rotate' : (ctx.isMoveMode ? 'translate' : null)
+  if (!desiredMode) {
+    rotationGizmo.detachRotationGizmo()
+    animLoop.requestRender()
+    return
+  }
+
+  // 找到目标零件 id
+  let targetId = ctx.rotatedAssemblyItemId
+  if (!targetId && ctx.selectedAssemblyItemIds && ctx.selectedAssemblyItemIds.size > 0) {
+    targetId = ctx.selectedAssemblyItemIds.values().next().value
+  }
+  if (!targetId) {
+    animLoop.requestRender()
+    return
+  }
+
+  // 弹出（或复用已弹出的）临时 Group
+  let pipeGroup = InstancedManager.getPoppedGroup(targetId)
+  if (!pipeGroup) pipeGroup = InstancedManager.popOutItem(targetId)
+  if (!pipeGroup) {
+    animLoop.requestRender()
+    return
+  }
+
+  // 切换零件时归还旧的
+  if (ctx.rotatedAssemblyItemId && ctx.rotatedAssemblyItemId !== targetId) {
+    InstancedManager.pushBackItem(ctx.rotatedAssemblyItemId)
+  }
+
+  if (desiredMode === 'rotate') {
+    rotationGizmo.attachRotationGizmo(pipeGroup, targetId)
+    window.dispatchEvent(new CustomEvent('show-transform-panel', {
+      detail: {
+        type: 'rotate',
+        id: targetId,
+        rotation: {
+          x: pipeGroup.rotation.x,
+          y: pipeGroup.rotation.y,
+          z: pipeGroup.rotation.z
+        }
+      }
+    }))
+  } else {
+    rotationGizmo.attachTranslateGizmo(pipeGroup, targetId)
+    const t = InstancedManager.getItemTransform(targetId)
+    // 多选时收集所有选中零件的当前位置作为批量移动起点
+    const selectedIds = Array.from(ctx.selectedAssemblyItemIds || [])
+    let batchItems = null
+    if (selectedIds.length > 1) {
+      batchItems = []
+      for (const id of selectedIds) {
+        const it = InstancedManager.getItemTransform(id)
+        if (it?.position) {
+          batchItems.push({ id, position: { x: it.position.x, y: it.position.y, z: it.position.z } })
+        }
+      }
+    }
+    window.dispatchEvent(new CustomEvent('show-transform-panel', {
+      detail: {
+        type: 'move',
+        id: targetId,
+        position: t?.position || { x: pipeGroup.position.x, y: pipeGroup.position.y, z: pipeGroup.position.z },
+        batchItems
+      }
+    }))
+  }
+  // 同步选中通知（让面板上的当前活动零件 id 更新）
+  window.dispatchEvent(new CustomEvent('assembly-item-selected', {
+    detail: { id: targetId }
+  }))
+  animLoop.requestRender()
+}
+
+// 微任务级防抖：连续切换模式时只执行最后一次状态应用，避免 detach→attach 闪烁
+let _gizmoApplyScheduled = false
+const _scheduleApplyGizmo = () => {
+  if (_gizmoApplyScheduled) return
+  _gizmoApplyScheduled = true
+  Promise.resolve().then(() => {
+    _gizmoApplyScheduled = false
+    _applyTransformGizmoState()
+  })
+}
+
 const handleRotationModeToggle = (event) => {
   ctx.isRotationMode = event.detail.enabled
-  if (!ctx.isRotationMode) rotationGizmo.detachRotationGizmo()
-  else if (ctx.selectedPipeGroup && ctx.rotatedAssemblyItemId)
-    rotationGizmo.attachRotationGizmo(ctx.selectedPipeGroup, ctx.rotatedAssemblyItemId)
-  animLoop.requestRender()
+  _scheduleApplyGizmo()
 }
 const handleRotationAxisChange = (event) => { ctx.rotationAxis = event.detail.axis }
 const handleMoveModeToggle = (event) => {
   ctx.isMoveMode = event.detail.enabled
-  // Detach gizmo when leaving move mode
-  if (!ctx.isMoveMode) rotationGizmo.detachRotationGizmo()
+  _scheduleApplyGizmo()
 }
 const handleArrayModeToggle = (event) => {
   ctx.isArrayMode = event.detail.enabled
@@ -721,6 +913,17 @@ onMounted(async () => {
   window.addEventListener('menu-width-changed', handleMenuWidthChanged)
   window.addEventListener('workspace-changed', assemblyView.handleWorkspaceChanged)
   window.addEventListener('export-assembly', sceneExport.handleExportAssembly)
+  window.addEventListener('request-render', () => animLoop.requestRender())
+  // 零件参数被编辑保存后，装配体里所有该零件的实例需要重建（segments 等几何参数变了）
+  window.addEventListener('refresh-assembly-view', (event) => {
+    if (!ctx.isAssemblyMode) return
+    // 强制全量重建（forceRebuild=true），避免增量分支只更新 transform 而漏掉几何变化
+    const items = event.detail?.assemblyItems
+    if (items && items.length > 0) {
+      assemblyView.updateAssemblyView(items, true, true)
+    }
+    animLoop.requestRender()
+  })
 
   // Layout observers
   const observeLayoutChanges = () => {
